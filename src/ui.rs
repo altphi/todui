@@ -135,14 +135,18 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
             .iter()
             .enumerate()
             .map(|(vi, (_real_idx, item))| {
-                let checkbox = if item.done { "●" } else { "○" };
+                let checkbox = if app.ascii_mode {
+                    if item.done { "[x]" } else { "[ ]" }
+                } else if item.done {
+                    "☑"
+                } else {
+                    "☐"
+                };
 
                 let mut spans = vec![];
 
                 let base_style = if item.done {
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::CROSSED_OUT)
+                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
@@ -171,9 +175,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                         .collect::<Vec<_>>()
                         .join(" ");
                     let tag_style = if item.done {
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::CROSSED_OUT)
+                        Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default().fg(Color::Blue)
                     };
@@ -358,7 +360,13 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                     SearchResult::Item(li, ii) => {
                         let item = &app.lists[*li].items[*ii];
                         let list_name = &app.lists[*li].name;
-                        let checkbox = if item.done { "●" } else { "○" };
+                        let checkbox = if app.ascii_mode {
+                            if item.done { "[x]" } else { "[ ]" }
+                        } else if item.done {
+                            "☑"
+                        } else {
+                            "☐"
+                        };
                         let text =
                             format!("  {} {}  \u{2014} {}", checkbox, item.title, list_name);
                         let style = if item.done {

@@ -13,8 +13,8 @@ use ratatui::DefaultTerminal;
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let data_dir = parse_args();
-    let mut app = app::App::new(data_dir)?;
+    let (data_dir, ascii_mode) = parse_args();
+    let mut app = app::App::new(data_dir, ascii_mode)?;
 
     let terminal = ratatui::init();
     let result = run(&mut app, terminal);
@@ -22,20 +22,28 @@ fn main() -> Result<()> {
     result
 }
 
-fn parse_args() -> PathBuf {
+fn parse_args() -> (PathBuf, bool) {
     let args: Vec<String> = std::env::args().collect();
+    let mut data_dir: Option<PathBuf> = None;
+    let mut ascii_mode = false;
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--dir"
             && let Some(dir) = args.get(i + 1)
         {
-            return PathBuf::from(shellexpand::tilde(dir).as_ref());
+            data_dir = Some(PathBuf::from(shellexpand::tilde(dir).as_ref()));
+            i += 1;
+        } else if args[i] == "--ascii" {
+            ascii_mode = true;
         }
         i += 1;
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("todos")
+    let data_dir = data_dir.unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("todos")
+    });
+    (data_dir, ascii_mode)
 }
 
 fn run(app: &mut app::App, mut terminal: DefaultTerminal) -> Result<()> {

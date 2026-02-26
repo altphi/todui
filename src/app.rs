@@ -18,10 +18,11 @@ pub struct App {
     pub redo_stack: Vec<AppSnapshot>,
     pub search_results: Vec<SearchResult>,
     pub search_selected: usize,
+    pub ascii_mode: bool,
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf) -> std::io::Result<Self> {
+    pub fn new(data_dir: PathBuf, ascii_mode: bool) -> std::io::Result<Self> {
         let lists = storage::load_lists(&data_dir)?;
         Ok(Self {
             lists,
@@ -38,6 +39,7 @@ impl App {
             redo_stack: Vec::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            ascii_mode,
         })
     }
 
@@ -58,6 +60,7 @@ impl App {
             redo_stack: Vec::new(),
             search_results: Vec::new(),
             search_selected: 0,
+            ascii_mode: false,
         }
     }
 
