@@ -1,7 +1,23 @@
 # todui
 
-TUI todo app in rust, using [ratatui](https://ratatui.rs).
+TUI todo + time tracking in rust, using [ratatui](https://ratatui.rs).
 
+## Features
+
+- Multiple lists with sidebar navigation
+- Add, edit, delete, reorder todos and lists
+- Mark todos done/not done, toggle visibility of completed items
+- Multi-select items with batch delete, toggle done, and move
+- Move items between lists with type-ahead-find picker
+- Tag system with `@tag` syntax and autocomplete
+- Filter by tag (OR logic, multi-select)
+- Fuzzy search across all lists, tags, and items
+- Focus mode with pause/resume timer and per-item time tracking
+- Vim-style keybindings (j/k, gg/G, Ctrl+D/U)
+- Undo/redo
+- ASCII mode fallback
+- File-based persistence (Markdown)
+- Single-instance lock file
 
 ## License
 
