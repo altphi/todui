@@ -44,6 +44,7 @@ pub fn render(app: &App, frame: &mut Frame) {
         InputMode::Searching => render_search_modal(app, frame),
         InputMode::Focused => render_focus_overlay(app, frame),
         InputMode::FilteringTags => render_filter_modal(app, frame),
+        InputMode::MovingToList => render_move_to_list_modal(app, frame),
         InputMode::AddingItem
         | InputMode::EditingItem
         | InputMode::EditingTags
@@ -175,8 +176,12 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
             .enumerate()
             .skip(offset)
             .take(visible_height)
-            .map(|(vi, (_real_idx, item))| {
-                let checkbox = if app.ascii_mode {
+            .map(|(vi, (real_idx, item))| {
+                let is_multi_selected = app.selected_items.contains(real_idx);
+
+                let checkbox = if is_multi_selected {
+                    if app.ascii_mode { "[*]" } else { "◆" }
+                } else if app.ascii_mode {
                     if item.done { "[x]" } else { "[ ]" }
                 } else if item.done {
                     "✔"
@@ -186,15 +191,19 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
                 let mut spans = vec![];
 
-                let base_style = if item.done {
+                let base_style = if is_multi_selected {
+                    Style::default().fg(Color::Yellow)
+                } else if item.done {
                     Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default()
                 };
 
-                let is_selected = is_active && vi == app.selected_item_index;
-                let bg_style = if is_selected {
-                    if item.done {
+                let is_cursor = is_active && vi == app.selected_item_index;
+                let bg_style = if is_cursor {
+                    if is_multi_selected {
+                        base_style.bg(Color::DarkGray)
+                    } else if item.done {
                         base_style.fg(Color::Gray).bg(Color::DarkGray)
                     } else {
                         base_style.bg(Color::DarkGray)
@@ -211,7 +220,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                 if item.time_secs > 0 {
                     let time_str = crate::storage::format_time(item.time_secs);
                     let time_style = Style::default().fg(Color::DarkGray);
-                    let time_style = if is_selected {
+                    let time_style = if is_cursor {
                         time_style.bg(Color::DarkGray).fg(Color::Gray)
                     } else {
                         time_style
@@ -226,17 +235,15 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                         .map(|t| format!("@{}", t))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    let tag_style = if item.done {
+                    let tag_style = if is_multi_selected {
+                        Style::default().fg(Color::Yellow)
+                    } else if item.done {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default().fg(Color::Blue)
                     };
-                    let tag_style = if is_selected {
-                        if item.done {
-                            tag_style.fg(Color::Gray).bg(Color::DarkGray)
-                        } else {
-                            tag_style.bg(Color::DarkGray)
-                        }
+                    let tag_style = if is_cursor {
+                        tag_style.bg(Color::DarkGray)
                     } else {
                         tag_style
                     };
@@ -262,6 +269,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         InputMode::FilteringTags => {
             "  j/k: navigate  Space: toggle  Enter: apply  Esc: cancel".to_string()
         }
+        InputMode::MovingToList => "  j/k: navigate  Enter: move  Esc: cancel".to_string(),
         InputMode::AddingItem
         | InputMode::AddingList
         | InputMode::RenamingList
@@ -275,18 +283,26 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             } else {
                 String::new()
             };
-            match app.active_pane {
-                Pane::Sidebar => {
-                    format!(
-                        "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  x: delete  Tab: todos  ?: help{}",
-                        filter_indicator
-                    )
-                }
-                Pane::Main => {
-                    format!(
-                        "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: delete  t: tags  f: filter  ?: help{}",
-                        filter_indicator
-                    )
+            if !app.selected_items.is_empty() {
+                format!(
+                    "  {} selected  Del: delete  Space: toggle done  m: move  Esc: clear{}",
+                    app.selected_items.len(),
+                    filter_indicator
+                )
+            } else {
+                match app.active_pane {
+                    Pane::Sidebar => {
+                        format!(
+                            "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  Del: delete  Tab: todos  ?: help{}",
+                            filter_indicator
+                        )
+                    }
+                    Pane::Main => {
+                        format!(
+                            "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: select  Del: delete  m: move  ?: help{}",
+                            filter_indicator
+                        )
+                    }
                 }
             }
         }
@@ -465,7 +481,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(65, 32, frame.area());
+    let area = centered_rect(65, 34, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -495,7 +511,10 @@ pub fn render_help(frame: &mut Frame) {
         help_row("Enter", "Edit todo title"),
         help_row("Space", "Toggle done"),
         help_row("t", "Edit tags"),
-        help_row("x", "Delete todo"),
+        help_row("x", "Toggle select"),
+        help_row("Del / Backspace", "Delete todo(s)"),
+        help_row("m", "Move to list"),
+        help_row("Esc", "Clear selection"),
         help_row("Shift+K/J / Alt+arrows", "Move up / down"),
         help_row("Alt+Super+arrows", "Move to top / bottom"),
         help_row("Shift+D", "Toggle show done"),
@@ -508,7 +527,7 @@ pub fn render_help(frame: &mut Frame) {
         help_row("Enter", "Rename list (sidebar)"),
         help_row("Shift+K/J / Alt+arrows", "Move up / down"),
         help_row("Alt+Super+arrows", "Move to top / bottom"),
-        help_row("x", "Delete list (sidebar)"),
+        help_row("Del / Backspace", "Delete list (sidebar)"),
         Line::from(""),
         section("General"),
         help_row("/", "Search"),
@@ -642,6 +661,68 @@ fn render_filter_modal(app: &App, frame: &mut Frame) {
 
     let list_widget = List::new(items);
     frame.render_widget(list_widget, inner);
+}
+
+fn render_move_to_list_modal(app: &App, frame: &mut Frame) {
+    let targets = app.move_to_list_targets();
+    let target_count = targets.len().max(1) as u16;
+    let height = (target_count + 4).min(20);
+    let width: u16 = 40.min(frame.area().width.saturating_sub(4));
+
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Move to List ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let input =
+        Paragraph::new(app.move_to_list_filter.as_str()).style(Style::default().fg(Color::Yellow));
+    frame.render_widget(input, chunks[0]);
+
+    let cursor_x = chunks[0].x + app.move_to_list_filter.len() as u16;
+    let cursor_y = chunks[0].y;
+    frame.set_cursor_position((cursor_x, cursor_y));
+
+    let sep_width = chunks[1].width as usize;
+    let separator =
+        Paragraph::new("\u{2500}".repeat(sep_width)).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(separator, chunks[1]);
+
+    if targets.is_empty() {
+        let hint = Paragraph::new("No matching lists").style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(hint, chunks[2]);
+    } else {
+        let items: Vec<ListItem> = targets
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name))| {
+                let is_selected = i == app.move_to_list_cursor;
+                let style = if is_selected {
+                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(format!("  {}", name), style)))
+            })
+            .collect();
+
+        let list_widget = List::new(items);
+        frame.render_widget(list_widget, chunks[2]);
+    }
 }
 
 fn render_autocomplete_dropdown(app: &App, frame: &mut Frame) {

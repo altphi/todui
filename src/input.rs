@@ -10,6 +10,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::Searching => handle_search_mode(app, key),
         InputMode::Focused => handle_focus_mode(app, key),
         InputMode::FilteringTags => handle_filter_mode(app, key),
+        InputMode::MovingToList => handle_move_to_list_mode(app, key),
         _ => handle_input_mode(app, key),
     }
 }
@@ -94,7 +95,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
     match (key.modifiers, key.code) {
         (_, KeyCode::Char(' ')) => {
-            app.toggle_done();
+            app.toggle_done_selected();
         }
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             app.start_input(InputMode::AddingItem, "");
@@ -122,8 +123,17 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 }
             }
         }
-        (_, KeyCode::Char('x') | KeyCode::Backspace) => {
-            app.delete_todo();
+        (KeyModifiers::NONE, KeyCode::Char('x')) => {
+            app.toggle_select_current();
+        }
+        (_, KeyCode::Delete | KeyCode::Backspace) => {
+            app.delete_selected();
+        }
+        (KeyModifiers::NONE, KeyCode::Char('m')) => {
+            app.start_move_to_list();
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.clear_selection();
         }
         (KeyModifiers::SHIFT, KeyCode::Up)
         | (KeyModifiers::SHIFT, KeyCode::Char('K'))
@@ -179,7 +189,7 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
                 app.start_input(InputMode::RenamingList, &name);
             }
         }
-        (_, KeyCode::Char('x') | KeyCode::Backspace) => {
+        (_, KeyCode::Delete | KeyCode::Backspace) => {
             if app.lists.len() > 1 {
                 app.input_mode = InputMode::ConfirmDelete;
             }
@@ -319,6 +329,30 @@ fn handle_filter_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_move_to_list_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            app.confirm_move_to_list();
+        }
+        KeyCode::Esc => {
+            app.cancel_move_to_list();
+        }
+        KeyCode::Up => {
+            app.move_to_list_move_up();
+        }
+        KeyCode::Down => {
+            app.move_to_list_move_down();
+        }
+        KeyCode::Backspace => {
+            app.move_to_list_delete_char();
+        }
+        KeyCode::Char(c) => {
+            app.move_to_list_insert_char(c);
+        }
+        _ => {}
+    }
+}
+
 fn handle_confirm_delete(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('y') => {
@@ -442,7 +476,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.lists[0].items.len(), 4);
-        assert_eq!(app.lists[0].items[3].title, "New task");
+        assert_eq!(app.lists[0].items[0].title, "New task");
     }
 
     #[test]
@@ -465,7 +499,7 @@ mod tests {
     fn test_delete_todo() {
         let mut app = sample_app();
         assert_eq!(app.lists[0].items.len(), 3);
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.lists[0].items.len(), 2);
     }
 
@@ -579,7 +613,7 @@ mod tests {
         let mut app = sample_app();
         assert_eq!(app.lists[0].items.len(), 3);
 
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.lists[0].items.len(), 2);
 
         handle_key(&mut app, key(KeyCode::Char('u')));
@@ -621,7 +655,7 @@ mod tests {
         app.active_pane = Pane::Sidebar;
         assert_eq!(app.lists.len(), 2);
 
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::ConfirmDelete);
 
         handle_key(&mut app, key(KeyCode::Char('y')));
@@ -635,7 +669,7 @@ mod tests {
         app.active_pane = Pane::Sidebar;
         assert_eq!(app.lists.len(), 2);
 
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::ConfirmDelete);
 
         handle_key(&mut app, key(KeyCode::Char('n')));
@@ -678,7 +712,7 @@ mod tests {
         let mut app = App::with_lists(vec![TodoList::new("Only")]);
         app.active_pane = Pane::Sidebar;
 
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
@@ -997,5 +1031,67 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Up));
         assert_eq!(app.autocomplete_cursor, 0);
+    }
+
+    #[test]
+    fn test_x_toggles_selection_in_main() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert!(!app.selected_items.is_empty());
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert!(app.selected_items.is_empty());
+    }
+
+    #[test]
+    fn test_delete_key_deletes_in_main() {
+        let mut app = sample_app();
+        assert_eq!(app.lists[0].items.len(), 3);
+        handle_key(&mut app, key(KeyCode::Delete));
+        assert_eq!(app.lists[0].items.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_key_in_sidebar_deletes_list() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Sidebar;
+        assert_eq!(app.lists.len(), 2);
+        handle_key(&mut app, key(KeyCode::Delete));
+        assert_eq!(app.input_mode, InputMode::ConfirmDelete);
+    }
+
+    #[test]
+    fn test_m_starts_move_to_list() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(app.input_mode, InputMode::MovingToList);
+    }
+
+    #[test]
+    fn test_move_to_list_mode_enter_confirms() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(app.input_mode, InputMode::MovingToList);
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.lists[1].items.len(), 1);
+    }
+
+    #[test]
+    fn test_move_to_list_mode_esc_cancels() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('m')));
+        assert_eq!(app.input_mode, InputMode::MovingToList);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.lists[0].items.len(), 3);
+    }
+
+    #[test]
+    fn test_esc_clears_selection_in_main() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert!(!app.selected_items.is_empty());
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(app.selected_items.is_empty());
     }
 }
