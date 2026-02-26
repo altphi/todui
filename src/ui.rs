@@ -23,10 +23,7 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     let main_area = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(80),
-        ])
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
         .split(outer[1]);
 
     render_sidebar(app, frame, main_area[0]);
@@ -126,7 +123,12 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
     let visible = app.visible_items();
 
-    if visible.is_empty() && !matches!(app.input_mode, InputMode::AddingItem | InputMode::EditingItem | InputMode::EditingTags) {
+    if visible.is_empty()
+        && !matches!(
+            app.input_mode,
+            InputMode::AddingItem | InputMode::EditingItem | InputMode::EditingTags
+        )
+    {
         let hint = if app.current_list().is_some() {
             if !app.show_done {
                 "All items completed. Press Shift+D to show."
@@ -221,9 +223,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let text: String = match app.input_mode {
-        InputMode::ConfirmDelete => {
-            "  y: confirm delete  n/Esc: cancel".to_string()
-        }
+        InputMode::ConfirmDelete => "  y: confirm delete  n/Esc: cancel".to_string(),
         InputMode::Searching => {
             "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel".to_string()
         }
@@ -246,10 +246,16 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             };
             match app.active_pane {
                 Pane::Sidebar => {
-                    format!("  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  x: delete  Tab: todos  ?: help{}", filter_indicator)
+                    format!(
+                        "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  x: delete  Tab: todos  ?: help{}",
+                        filter_indicator
+                    )
                 }
                 Pane::Main => {
-                    format!("  j/k: navigate  Space: toggle  n: new  Enter: edit  x: delete  t: tags  f: filter  ?: help{}", filter_indicator)
+                    format!(
+                        "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: delete  t: tags  f: filter  ?: help{}",
+                        filter_indicator
+                    )
                 }
             }
         }
@@ -340,8 +346,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
         ])
         .split(inner);
 
-    let input = Paragraph::new(app.input_buffer.as_str())
-        .style(Style::default().fg(Color::Yellow));
+    let input = Paragraph::new(app.input_buffer.as_str()).style(Style::default().fg(Color::Yellow));
     frame.render_widget(input, chunks[0]);
 
     let cursor_x = chunks[0].x + app.input_cursor as u16;
@@ -349,19 +354,17 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
     frame.set_cursor_position((cursor_x, cursor_y));
 
     let sep_width = chunks[1].width as usize;
-    let separator = Paragraph::new("\u{2500}".repeat(sep_width))
-        .style(Style::default().fg(Color::DarkGray));
+    let separator =
+        Paragraph::new("\u{2500}".repeat(sep_width)).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(separator, chunks[1]);
 
     let results_area = chunks[2];
 
     if app.input_buffer.is_empty() {
-        let hint = Paragraph::new("Type to search...")
-            .style(Style::default().fg(Color::DarkGray));
+        let hint = Paragraph::new("Type to search...").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint, results_area);
     } else if app.search_results.is_empty() {
-        let no_match = Paragraph::new("No matches")
-            .style(Style::default().fg(Color::DarkGray));
+        let no_match = Paragraph::new("No matches").style(Style::default().fg(Color::DarkGray));
         frame.render_widget(no_match, results_area);
     } else {
         let visible_height = results_area.height as usize;
@@ -387,10 +390,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                         } else {
                             Style::default().fg(Color::Cyan)
                         };
-                        ListItem::new(Line::from(Span::styled(
-                            format!("  # {}", name),
-                            style,
-                        )))
+                        ListItem::new(Line::from(Span::styled(format!("  # {}", name), style)))
                     }
                     SearchResult::Item(li, ii) => {
                         let item = &app.lists[*li].items[*ii];
@@ -521,19 +521,29 @@ fn render_focus_overlay(app: &App, frame: &mut Frame) {
         total_str
     };
 
-    let pause_hint = if is_paused { "Space: resume" } else { "Space: pause" };
+    let pause_hint = if is_paused {
+        "Space: resume"
+    } else {
+        "Space: pause"
+    };
     let pause_label = if is_paused { "  PAUSED" } else { "" };
 
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             item.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD).fg(Color::White),
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::White),
         )),
         Line::from(""),
         Line::from(Span::styled(
             format!("{}{}", session_str, pause_label),
-            Style::default().fg(if is_paused { Color::Yellow } else { Color::Green }),
+            Style::default().fg(if is_paused {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -547,10 +557,14 @@ fn render_focus_overlay(app: &App, frame: &mut Frame) {
         )),
     ];
 
-    let paragraph = Paragraph::new(lines)
-        .alignment(Alignment::Center);
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     let v_offset = inner.height.saturating_sub(8) / 2;
-    let centered = Rect::new(inner.x, inner.y + v_offset, inner.width, 8.min(inner.height));
+    let centered = Rect::new(
+        inner.x,
+        inner.y + v_offset,
+        inner.width,
+        8.min(inner.height),
+    );
     frame.render_widget(paragraph, centered);
 }
 

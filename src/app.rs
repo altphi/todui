@@ -391,10 +391,7 @@ impl App {
             return;
         }
 
-        let selected: Vec<bool> = tags
-            .iter()
-            .map(|t| self.filter_tags.contains(t))
-            .collect();
+        let selected: Vec<bool> = tags.iter().map(|t| self.filter_tags.contains(t)).collect();
 
         self.filter_available_tags = tags;
         self.filter_selected = selected;
@@ -691,10 +688,7 @@ impl App {
             }
             for (ii, item) in list.items.iter().enumerate() {
                 let title_match = item.title.to_lowercase().contains(&query);
-                let tag_match = item
-                    .tags
-                    .iter()
-                    .any(|t| t.to_lowercase().contains(&query));
+                let tag_match = item.tags.iter().any(|t| t.to_lowercase().contains(&query));
                 if title_match || tag_match {
                     self.search_results.push(SearchResult::Item(li, ii));
                 }
@@ -709,8 +703,7 @@ impl App {
     }
 
     pub fn search_select_next(&mut self) {
-        if !self.search_results.is_empty() && self.search_selected + 1 < self.search_results.len()
-        {
+        if !self.search_results.is_empty() && self.search_selected + 1 < self.search_results.len() {
             self.search_selected += 1;
         }
     }
@@ -1112,10 +1105,11 @@ mod tests {
         app.start_search();
         app.input_buffer = "Personal".to_string();
         app.update_search_results();
-        assert!(app
-            .search_results
-            .iter()
-            .any(|r| *r == SearchResult::List(1)));
+        assert!(
+            app.search_results
+                .iter()
+                .any(|r| *r == SearchResult::List(1))
+        );
     }
 
     #[test]

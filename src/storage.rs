@@ -17,7 +17,12 @@ pub fn parse_todo_line(line: &str) -> Option<TodoItem> {
     };
     let (title_and_time, tags) = extract_tags(rest);
     let (title, time_secs) = extract_time(&title_and_time);
-    Some(TodoItem { title, done, tags, time_secs })
+    Some(TodoItem {
+        title,
+        done,
+        tags,
+        time_secs,
+    })
 }
 
 /// Collects trailing @word tokens from right to left; stops at the first non-tag word.
@@ -98,7 +103,10 @@ pub fn serialize_list(list: &TodoList) -> String {
             let tags: Vec<String> = item.tags.iter().map(|t| format!("@{}", t)).collect();
             output.push_str(&format!(
                 "- {} {}{} {}\n",
-                checkbox, item.title, time_part, tags.join(" ")
+                checkbox,
+                item.title,
+                time_part,
+                tags.join(" ")
             ));
         }
     }
@@ -494,10 +502,7 @@ mod tests {
             ],
         };
         let output = serialize_list(&list);
-        assert_eq!(
-            output,
-            "# Work\n\n- [ ] Task A [45m] @code\n- [x] Task B\n"
-        );
+        assert_eq!(output, "# Work\n\n- [ ] Task A [45m] @code\n- [x] Task B\n");
     }
 
     #[test]

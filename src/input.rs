@@ -115,7 +115,11 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 let visible = app.visible_items();
                 if let Some(&(real_idx, _)) = visible.get(app.selected_item_index) {
                     let time_str = crate::storage::format_time(list.items[real_idx].time_secs);
-                    let prefill = if time_str.is_empty() { "0m".to_string() } else { time_str };
+                    let prefill = if time_str.is_empty() {
+                        "0m".to_string()
+                    } else {
+                        time_str
+                    };
                     app.start_input(InputMode::EditingTime, &prefill);
                 }
             }
@@ -512,14 +516,14 @@ mod tests {
 
     #[test]
     fn test_sidebar_move_list_up() {
-        let mut app = App::with_lists(vec![
-            TodoList::new("Alpha"),
-            TodoList::new("Beta"),
-        ]);
+        let mut app = App::with_lists(vec![TodoList::new("Alpha"), TodoList::new("Beta")]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 1;
 
-        handle_key(&mut app, key_with_mod(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('K'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
@@ -527,14 +531,14 @@ mod tests {
 
     #[test]
     fn test_sidebar_move_list_down() {
-        let mut app = App::with_lists(vec![
-            TodoList::new("Alpha"),
-            TodoList::new("Beta"),
-        ]);
+        let mut app = App::with_lists(vec![TodoList::new("Alpha"), TodoList::new("Beta")]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 0;
 
-        handle_key(&mut app, key_with_mod(KeyCode::Char('J'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('J'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.selected_list_index, 1);
@@ -634,14 +638,20 @@ mod tests {
     #[test]
     fn test_focus_mode_entry() {
         let mut app = sample_app();
-        handle_key(&mut app, key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.input_mode, InputMode::Focused);
     }
 
     #[test]
     fn test_focus_mode_stop() {
         let mut app = sample_app();
-        handle_key(&mut app, key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.input_mode, InputMode::Focused);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -650,7 +660,10 @@ mod tests {
     #[test]
     fn test_focus_mode_pause() {
         let mut app = sample_app();
-        handle_key(&mut app, key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
+        );
         assert!(app.focus_start.is_some());
         handle_key(&mut app, key(KeyCode::Char(' ')));
         assert!(app.focus_start.is_none());
@@ -662,7 +675,10 @@ mod tests {
     fn test_edit_time_entry() {
         let mut app = sample_app();
         app.lists[0].items[0].time_secs = 3600;
-        handle_key(&mut app, key_with_mod(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.input_mode, InputMode::EditingTime);
         assert_eq!(app.input_buffer, "1h");
     }
