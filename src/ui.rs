@@ -89,10 +89,19 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let visible_height = inner.height as usize;
+    let offset = if app.selected_list_index >= visible_height {
+        app.selected_list_index - visible_height + 1
+    } else {
+        0
+    };
+
     let items: Vec<ListItem> = app
         .lists
         .iter()
         .enumerate()
+        .skip(offset)
+        .take(visible_height)
         .map(|(i, list)| {
             let content = format!("  {}", list.name);
             let style = if i == app.selected_list_index {
@@ -154,9 +163,18 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
         let hint_paragraph = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint_paragraph, inner);
     } else {
+        let visible_height = inner.height as usize;
+        let offset = if app.selected_item_index >= visible_height {
+            app.selected_item_index - visible_height + 1
+        } else {
+            0
+        };
+
         let items: Vec<ListItem> = visible
             .iter()
             .enumerate()
+            .skip(offset)
+            .take(visible_height)
             .map(|(vi, (_real_idx, item))| {
                 let checkbox = if app.ascii_mode {
                     if item.done { "[x]" } else { "[ ]" }
@@ -447,7 +465,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(65, 31, frame.area());
+    let area = centered_rect(65, 32, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -469,7 +487,8 @@ pub fn render_help(frame: &mut Frame) {
         section("Navigation"),
         help_row("j / k", "Move down / up"),
         help_row("Tab", "Switch pane"),
-        help_row("g / G", "Jump to first / last"),
+        help_row("gg / G", "Jump to first / last"),
+        help_row("Ctrl+D / Ctrl+U", "Half-page down / up"),
         Line::from(""),
         section("Todos"),
         help_row("n", "Add new todo"),
