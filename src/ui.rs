@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
 use crate::app::App;
@@ -21,9 +21,18 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     render_title_bar(frame, outer[0]);
 
+    let longest_list_name = app
+        .lists
+        .iter()
+        .map(|l| l.name.len() as u16)
+        .max()
+        .unwrap_or(4);
+    // 2 border + 2 inner padding + 2 text padding + 2 balance + name length, minimum 14
+    let sidebar_width = (longest_list_name + 8).max(14);
+
     let main_area = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
         .split(outer[1]);
 
     render_sidebar(app, frame, main_area[0]);
@@ -73,7 +82,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Lists ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -116,7 +127,9 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::new(1, 1, 0, 0));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -434,51 +447,55 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(55, 29, frame.area());
+    let area = centered_rect(65, 31, frame.area());
 
     frame.render_widget(Clear, area);
 
+    let key_style = Style::default().fg(Color::Yellow);
+    let help_row = |key: &str, desc: &str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {:<28}", key), key_style),
+            Span::raw(desc.to_string()),
+        ])
+    };
+    let section = |title: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!(" {title}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+    };
+
     let help_text = vec![
-        Line::from(Span::styled(
-            " Navigation",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  j / k          Move down / up"),
-        Line::from("  Tab            Switch pane"),
-        Line::from("  g / G          Jump to first / last"),
+        section("Navigation"),
+        help_row("j / k", "Move down / up"),
+        help_row("Tab", "Switch pane"),
+        help_row("g / G", "Jump to first / last"),
         Line::from(""),
-        Line::from(Span::styled(
-            " Todos",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  n              Add new todo"),
-        Line::from("  Enter          Edit todo title"),
-        Line::from("  Space          Toggle done"),
-        Line::from("  t              Edit tags"),
-        Line::from("  x              Delete todo"),
-        Line::from("  Shift+K / J    Move todo up / down"),
-        Line::from("  Shift+D        Toggle show done"),
-        Line::from("  f              Filter by tag"),
-        Line::from("  Shift+F        Focus mode (timer)"),
-        Line::from("  Shift+T        Edit time"),
+        section("Todos"),
+        help_row("n", "Add new todo"),
+        help_row("Enter", "Edit todo title"),
+        help_row("Space", "Toggle done"),
+        help_row("t", "Edit tags"),
+        help_row("x", "Delete todo"),
+        help_row("Shift+K/J / Alt+arrows", "Move up / down"),
+        help_row("Alt+Super+arrows", "Move to top / bottom"),
+        help_row("Shift+D", "Toggle show done"),
+        help_row("f", "Filter by tag"),
+        help_row("Shift+F", "Focus mode (timer)"),
+        help_row("Shift+T", "Edit time"),
         Line::from(""),
-        Line::from(Span::styled(
-            " Lists",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  n              Add new list (sidebar)"),
-        Line::from("  Enter          Rename list (sidebar)"),
-        Line::from("  Shift+K / J    Move list up / down"),
-        Line::from("  x              Delete list (sidebar)"),
+        section("Lists"),
+        help_row("n", "Add new list (sidebar)"),
+        help_row("Enter", "Rename list (sidebar)"),
+        help_row("Shift+K/J / Alt+arrows", "Move up / down"),
+        help_row("Alt+Super+arrows", "Move to top / bottom"),
+        help_row("x", "Delete list (sidebar)"),
         Line::from(""),
-        Line::from(Span::styled(
-            " General",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  /              Search"),
-        Line::from("  u / Ctrl+R     Undo / Redo"),
-        Line::from("  ?              Toggle help"),
-        Line::from("  q              Quit"),
+        section("General"),
+        help_row("/", "Search"),
+        help_row("u / Ctrl+R", "Undo / Redo"),
+        help_row("?", "Toggle help"),
+        help_row("q", "Quit"),
     ];
 
     let block = Block::default()

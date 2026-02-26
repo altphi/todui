@@ -95,11 +95,19 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
         (_, KeyCode::Char('x') | KeyCode::Backspace) => {
             app.delete_todo();
         }
-        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
+        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::SHIFT, KeyCode::Char('K'))
+        | (KeyModifiers::ALT, KeyCode::Up) => {
             app.move_todo_up();
         }
-        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
+        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::SHIFT, KeyCode::Char('J'))
+        | (KeyModifiers::ALT, KeyCode::Down) => {
             app.move_todo_down();
+        }
+        (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
+            app.move_todo_to_top();
+        }
+        (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
+            app.move_todo_to_bottom();
         }
         (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
             app.toggle_show_done();
@@ -144,11 +152,19 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
                 app.input_mode = InputMode::ConfirmDelete;
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::SHIFT, KeyCode::Char('K')) => {
+        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::SHIFT, KeyCode::Char('K'))
+        | (KeyModifiers::ALT, KeyCode::Up) => {
             app.move_list_up();
         }
-        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::SHIFT, KeyCode::Char('J')) => {
+        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::SHIFT, KeyCode::Char('J'))
+        | (KeyModifiers::ALT, KeyCode::Down) => {
             app.move_list_down();
+        }
+        (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
+            app.move_list_to_top();
+        }
+        (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
+            app.move_list_to_bottom();
         }
         _ => {}
     }
@@ -432,6 +448,85 @@ mod tests {
         handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::SHIFT));
         assert_eq!(app.lists[0].items[0].title, "Task C");
         assert_eq!(app.selected_item_index, 1);
+    }
+
+    #[test]
+    fn test_move_todo_alt_keys() {
+        let mut app = sample_app();
+        app.selected_item_index = 1;
+
+        handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(app.selected_item_index, 0);
+
+        handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(app.selected_item_index, 1);
+    }
+
+    #[test]
+    fn test_move_todo_alt_shift_to_top() {
+        let mut app = sample_app();
+        app.selected_item_index = 2; // Task B (done, last visible)
+
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SUPER),
+        );
+        assert_eq!(app.lists[0].items[0].title, "Task B");
+    }
+
+    #[test]
+    fn test_move_todo_alt_shift_to_bottom() {
+        let mut app = sample_app();
+        app.selected_item_index = 0; // Task A
+
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SUPER),
+        );
+        assert_eq!(app.lists[0].items[2].title, "Task A");
+    }
+
+    #[test]
+    fn test_move_list_alt_keys() {
+        let mut app = App::with_lists(vec![TodoList::new("Alpha"), TodoList::new("Beta")]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_list_index = 0;
+
+        handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(app.lists[0].name, "Beta");
+        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.selected_list_index, 1);
+
+        handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(app.lists[0].name, "Alpha");
+        assert_eq!(app.selected_list_index, 0);
+    }
+
+    #[test]
+    fn test_move_list_alt_shift_to_top_bottom() {
+        let mut app = App::with_lists(vec![
+            TodoList::new("Alpha"),
+            TodoList::new("Beta"),
+            TodoList::new("Gamma"),
+        ]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_list_index = 0;
+
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SUPER),
+        );
+        assert_eq!(app.lists[0].name, "Beta");
+        assert_eq!(app.lists[1].name, "Gamma");
+        assert_eq!(app.lists[2].name, "Alpha");
+        assert_eq!(app.selected_list_index, 2);
+
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SUPER),
+        );
+        assert_eq!(app.lists[0].name, "Alpha");
+        assert_eq!(app.selected_list_index, 0);
     }
 
     #[test]

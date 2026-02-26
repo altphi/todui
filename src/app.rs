@@ -325,6 +325,42 @@ impl App {
         }
     }
 
+    pub fn move_todo_to_top(&mut self) {
+        if let Some(real_idx) = self.selected_real_index()
+            && real_idx > 0
+        {
+            self.push_undo();
+            if let Some(list) = self.current_list_mut() {
+                let item = list.items.remove(real_idx);
+                list.items.insert(0, item);
+            }
+            let visible = self.visible_items();
+            if let Some(vi) = visible.iter().position(|(ri, _)| *ri == 0) {
+                self.selected_item_index = vi;
+            }
+            self.save_current_list();
+        }
+    }
+
+    pub fn move_todo_to_bottom(&mut self) {
+        if let Some(real_idx) = self.selected_real_index() {
+            let len = self.current_list().map_or(0, |l| l.items.len());
+            if real_idx + 1 < len {
+                self.push_undo();
+                if let Some(list) = self.current_list_mut() {
+                    let item = list.items.remove(real_idx);
+                    list.items.push(item);
+                }
+                let new_real_idx = self.current_list().map_or(0, |l| l.items.len()) - 1;
+                let visible = self.visible_items();
+                if let Some(vi) = visible.iter().position(|(ri, _)| *ri == new_real_idx) {
+                    self.selected_item_index = vi;
+                }
+                self.save_current_list();
+            }
+        }
+    }
+
     pub fn toggle_show_done(&mut self) {
         self.show_done = !self.show_done;
         self.clamp_selection();
@@ -588,6 +624,26 @@ impl App {
             self.lists
                 .swap(self.selected_list_index, self.selected_list_index + 1);
             self.selected_list_index += 1;
+            self.save_order();
+        }
+    }
+
+    pub fn move_list_to_top(&mut self) {
+        if self.selected_list_index > 0 {
+            self.push_undo();
+            let list = self.lists.remove(self.selected_list_index);
+            self.lists.insert(0, list);
+            self.selected_list_index = 0;
+            self.save_order();
+        }
+    }
+
+    pub fn move_list_to_bottom(&mut self) {
+        if self.selected_list_index + 1 < self.lists.len() {
+            self.push_undo();
+            let list = self.lists.remove(self.selected_list_index);
+            self.lists.push(list);
+            self.selected_list_index = self.lists.len() - 1;
             self.save_order();
         }
     }
@@ -939,6 +995,112 @@ mod tests {
 
         app.move_list_down();
         assert_eq!(app.lists[2].name, "Beta");
+        assert_eq!(app.selected_list_index, 2);
+    }
+
+    #[test]
+    fn test_move_todo_to_top() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem { title: "A".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "B".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "C".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.selected_item_index = 2;
+
+        app.move_todo_to_top();
+        assert_eq!(app.lists[0].items[0].title, "C");
+        assert_eq!(app.lists[0].items[1].title, "A");
+        assert_eq!(app.lists[0].items[2].title, "B");
+        assert_eq!(app.selected_item_index, 0);
+    }
+
+    #[test]
+    fn test_move_todo_to_top_already_first() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem { title: "A".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "B".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.selected_item_index = 0;
+
+        app.move_todo_to_top();
+        assert_eq!(app.lists[0].items[0].title, "A");
+        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.selected_item_index, 0);
+    }
+
+    #[test]
+    fn test_move_todo_to_bottom() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem { title: "A".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "B".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "C".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.selected_item_index = 0;
+
+        app.move_todo_to_bottom();
+        assert_eq!(app.lists[0].items[0].title, "B");
+        assert_eq!(app.lists[0].items[1].title, "C");
+        assert_eq!(app.lists[0].items[2].title, "A");
+        assert_eq!(app.selected_item_index, 2);
+    }
+
+    #[test]
+    fn test_move_todo_to_bottom_already_last() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem { title: "A".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list.items.push(TodoItem { title: "B".to_string(), done: false, tags: vec![], time_secs: 0 });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.selected_item_index = 1;
+
+        app.move_todo_to_bottom();
+        assert_eq!(app.lists[0].items[0].title, "A");
+        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.selected_item_index, 1);
+    }
+
+    #[test]
+    fn test_move_list_to_top() {
+        let mut app = App::with_lists(vec![
+            TodoList::new("Alpha"),
+            TodoList::new("Beta"),
+            TodoList::new("Gamma"),
+        ]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_list_index = 2;
+
+        app.move_list_to_top();
+        assert_eq!(app.lists[0].name, "Gamma");
+        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.lists[2].name, "Beta");
+        assert_eq!(app.selected_list_index, 0);
+    }
+
+    #[test]
+    fn test_move_list_to_bottom() {
+        let mut app = App::with_lists(vec![
+            TodoList::new("Alpha"),
+            TodoList::new("Beta"),
+            TodoList::new("Gamma"),
+        ]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_list_index = 0;
+
+        app.move_list_to_bottom();
+        assert_eq!(app.lists[0].name, "Beta");
+        assert_eq!(app.lists[1].name, "Gamma");
+        assert_eq!(app.lists[2].name, "Alpha");
         assert_eq!(app.selected_list_index, 2);
     }
 
