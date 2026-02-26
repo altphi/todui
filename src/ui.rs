@@ -146,9 +146,9 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                 let checkbox = if app.ascii_mode {
                     if item.done { "[x]" } else { "[ ]" }
                 } else if item.done {
-                    "☑"
+                    "✔"
                 } else {
-                    "☐"
+                    "❑"
                 };
 
                 let mut spans = vec![];
@@ -398,9 +398,9 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                         let checkbox = if app.ascii_mode {
                             if item.done { "[x]" } else { "[ ]" }
                         } else if item.done {
-                            "☑"
+                            "✔"
                         } else {
-                            "☐"
+                            "❑"
                         };
                         let time_part = if item.time_secs > 0 {
                             format!("  {}", crate::storage::format_time(item.time_secs))
