@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -36,11 +36,19 @@ pub fn render(app: &App, frame: &mut Frame) {
     match app.input_mode {
         InputMode::ConfirmDelete => render_confirm_dialog(app, frame),
         InputMode::Searching => render_search_modal(app, frame),
+        InputMode::Focused => render_focus_overlay(app, frame),
+        InputMode::FilteringTags => render_filter_modal(app, frame),
         InputMode::AddingItem
         | InputMode::EditingItem
         | InputMode::EditingTags
         | InputMode::AddingList
-        | InputMode::RenamingList => render_input_modal(app, frame),
+        | InputMode::RenamingList
+        | InputMode::EditingTime => {
+            render_input_modal(app, frame);
+            if app.autocomplete_active {
+                render_autocomplete_dropdown(app, frame);
+            }
+        }
         InputMode::Normal => {}
     }
 }
@@ -167,6 +175,17 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                     bg_style,
                 ));
 
+                if item.time_secs > 0 {
+                    let time_str = crate::storage::format_time(item.time_secs);
+                    let time_style = Style::default().fg(Color::DarkGray);
+                    let time_style = if is_selected {
+                        time_style.bg(Color::DarkGray).fg(Color::Gray)
+                    } else {
+                        time_style
+                    };
+                    spans.push(Span::styled(format!("  {}", time_str), time_style));
+                }
+
                 if !item.tags.is_empty() {
                     let tags_str = item
                         .tags
@@ -201,22 +220,39 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let text = match app.input_mode {
-        InputMode::ConfirmDelete => "  y: confirm delete  n/Esc: cancel",
-        InputMode::Searching => "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel",
+    let text: String = match app.input_mode {
+        InputMode::ConfirmDelete => {
+            "  y: confirm delete  n/Esc: cancel".to_string()
+        }
+        InputMode::Searching => {
+            "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel".to_string()
+        }
+        InputMode::Focused => "  Space: pause/resume  Esc: stop".to_string(),
+        InputMode::FilteringTags => {
+            "  j/k: navigate  Space: toggle  Enter: apply  Esc: cancel".to_string()
+        }
         InputMode::AddingItem
         | InputMode::AddingList
         | InputMode::RenamingList
         | InputMode::EditingItem
-        | InputMode::EditingTags => "  Enter: confirm  Esc: cancel",
-        InputMode::Normal => match app.active_pane {
-            Pane::Sidebar => {
-                "  j/k: navigate  n: new list  Enter: rename  x: delete  Tab: todos  ?: help  q: quit"
+        | InputMode::EditingTags
+        | InputMode::EditingTime => "  Enter: confirm  Esc: cancel".to_string(),
+        InputMode::Normal => {
+            let filter_indicator = if !app.filter_tags.is_empty() {
+                let tags: Vec<String> = app.filter_tags.iter().map(|t| format!("@{}", t)).collect();
+                format!("  Filter: {}", tags.join(" "))
+            } else {
+                String::new()
+            };
+            match app.active_pane {
+                Pane::Sidebar => {
+                    format!("  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  x: delete  Tab: todos  ?: help{}", filter_indicator)
+                }
+                Pane::Main => {
+                    format!("  j/k: navigate  Space: toggle  n: new  Enter: edit  x: delete  t: tags  f: filter  ?: help{}", filter_indicator)
+                }
             }
-            Pane::Main => {
-                "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: delete  t: tags  Shift+D: hide done  ?: help"
-            }
-        },
+        }
     };
 
     let bar = Paragraph::new(text).style(Style::default().fg(Color::White).bg(Color::DarkGray));
@@ -230,6 +266,7 @@ fn render_input_modal(app: &App, frame: &mut Frame) {
         InputMode::EditingTags => " Tags ",
         InputMode::AddingList => " New List ",
         InputMode::RenamingList => " Rename ",
+        InputMode::EditingTime => " Set Time ",
         _ => "",
     };
 
@@ -281,7 +318,6 @@ fn render_confirm_dialog(app: &App, frame: &mut Frame) {
 fn render_search_modal(app: &App, frame: &mut Frame) {
     let term = frame.area();
     let width: u16 = 60.min(term.width.saturating_sub(4));
-    // Fixed height: 60% of terminal, minimum 8 rows
     let total_height = (term.height * 60 / 100).max(8);
 
     let area = centered_rect(width, total_height, term);
@@ -328,7 +364,6 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(no_match, results_area);
     } else {
-        // Compute scroll offset to keep selected visible
         let visible_height = results_area.height as usize;
         let offset = if app.search_selected >= visible_height {
             app.search_selected - visible_height + 1
@@ -367,8 +402,15 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                         } else {
                             "☐"
                         };
-                        let text =
-                            format!("  {} {}  \u{2014} {}", checkbox, item.title, list_name);
+                        let time_part = if item.time_secs > 0 {
+                            format!("  {}", crate::storage::format_time(item.time_secs))
+                        } else {
+                            String::new()
+                        };
+                        let text = format!(
+                            "  {} {}{}  \u{2014} {}",
+                            checkbox, item.title, time_part, list_name
+                        );
                         let style = if item.done {
                             if is_selected {
                                 Style::default().fg(Color::Gray).bg(Color::DarkGray)
@@ -392,7 +434,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(55, 25, frame.area());
+    let area = centered_rect(55, 29, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -416,6 +458,9 @@ pub fn render_help(frame: &mut Frame) {
         Line::from("  x              Delete todo"),
         Line::from("  Shift+K / J    Move todo up / down"),
         Line::from("  Shift+D        Toggle show done"),
+        Line::from("  f              Filter by tag"),
+        Line::from("  Shift+F        Focus mode (timer)"),
+        Line::from("  Shift+T        Edit time"),
         Line::from(""),
         Line::from(Span::styled(
             " Lists",
@@ -423,6 +468,7 @@ pub fn render_help(frame: &mut Frame) {
         )),
         Line::from("  n              Add new list (sidebar)"),
         Line::from("  Enter          Rename list (sidebar)"),
+        Line::from("  Shift+K / J    Move list up / down"),
         Line::from("  x              Delete list (sidebar)"),
         Line::from(""),
         Line::from(Span::styled(
@@ -445,6 +491,146 @@ pub fn render_help(frame: &mut Frame) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
+}
+
+fn render_focus_overlay(app: &App, frame: &mut Frame) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let item = &app.lists[app.focus_list].items[app.focus_item];
+    let session_secs = app.focus_elapsed_secs();
+    let total_secs = item.time_secs + session_secs;
+    let is_paused = app.focus_start.is_none();
+
+    let session_h = session_secs / 3600;
+    let session_m = (session_secs % 3600) / 60;
+    let session_s = session_secs % 60;
+    let session_str = format!("{:02}:{:02}:{:02}", session_h, session_m, session_s);
+
+    let total_str = crate::storage::format_time(total_secs);
+    let total_display = if total_str.is_empty() {
+        "0m".to_string()
+    } else {
+        total_str
+    };
+
+    let pause_hint = if is_paused { "Space: resume" } else { "Space: pause" };
+    let pause_label = if is_paused { "  PAUSED" } else { "" };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            item.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("{}{}", session_str, pause_label),
+            Style::default().fg(if is_paused { Color::Yellow } else { Color::Green }),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Total: {}", total_display),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Esc: stop  {}", pause_hint),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Center);
+    let v_offset = inner.height.saturating_sub(8) / 2;
+    let centered = Rect::new(inner.x, inner.y + v_offset, inner.width, 8.min(inner.height));
+    frame.render_widget(paragraph, centered);
+}
+
+fn render_filter_modal(app: &App, frame: &mut Frame) {
+    let tag_count = app.filter_available_tags.len() as u16;
+    let height = (tag_count + 2).min(20);
+    let width: u16 = 40.min(frame.area().width.saturating_sub(4));
+
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Filter by Tag ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = app
+        .filter_available_tags
+        .iter()
+        .enumerate()
+        .map(|(i, tag)| {
+            let checked = app.filter_selected.get(i).copied().unwrap_or(false);
+            let checkbox = if checked { "[x]" } else { "[ ]" };
+            let is_selected = i == app.filter_cursor;
+            let style = if is_selected {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("  {} @{}", checkbox, tag),
+                style,
+            )))
+        })
+        .collect();
+
+    let list_widget = List::new(items);
+    frame.render_widget(list_widget, inner);
+}
+
+fn render_autocomplete_dropdown(app: &App, frame: &mut Frame) {
+    if app.autocomplete_suggestions.is_empty() {
+        return;
+    }
+
+    // Position dropdown below the input modal
+    let modal_area = centered_rect(50, 3, frame.area());
+    let suggestion_count = app.autocomplete_suggestions.len().min(5) as u16;
+    let dropdown_y = modal_area.y + modal_area.height;
+    let dropdown_width = modal_area.width.min(30);
+    let dropdown_x = modal_area.x;
+
+    if dropdown_y + suggestion_count > frame.area().height {
+        return;
+    }
+
+    let dropdown_area = Rect::new(dropdown_x, dropdown_y, dropdown_width, suggestion_count);
+    frame.render_widget(Clear, dropdown_area);
+
+    let items: Vec<ListItem> = app
+        .autocomplete_suggestions
+        .iter()
+        .enumerate()
+        .take(5)
+        .map(|(i, tag)| {
+            let is_selected = i == app.autocomplete_cursor;
+            let style = if is_selected {
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White).bg(Color::Black)
+            };
+            ListItem::new(Line::from(Span::styled(format!(" @{}", tag), style)))
+        })
+        .collect();
+
+    let list_widget = List::new(items).style(Style::default().bg(Color::Black));
+    frame.render_widget(list_widget, dropdown_area);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

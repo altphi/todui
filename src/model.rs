@@ -3,6 +3,7 @@ pub struct TodoItem {
     pub title: String,
     pub done: bool,
     pub tags: Vec<String>,
+    pub time_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,12 +28,15 @@ pub enum InputMode {
     EditingTags,
     ConfirmDelete,
     Searching,
+    Focused,
+    EditingTime,
+    FilteringTags,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchResult {
-    List(usize),         // list_index
-    Item(usize, usize),  // list_index, item_index (real index into items vec)
+    List(usize),
+    Item(usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +53,7 @@ impl TodoItem {
             title: title.into(),
             done: false,
             tags: Vec::new(),
+            time_secs: 0,
         }
     }
 }
@@ -72,6 +77,12 @@ mod tests {
         assert_eq!(item.title, "Buy groceries");
         assert!(!item.done);
         assert!(item.tags.is_empty());
+    }
+
+    #[test]
+    fn test_todo_item_default_time() {
+        let item = TodoItem::new("Test");
+        assert_eq!(item.time_secs, 0);
     }
 
     #[test]

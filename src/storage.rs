@@ -15,11 +15,12 @@ pub fn parse_todo_line(line: &str) -> Option<TodoItem> {
     } else {
         return None;
     };
-    let (title, tags) = extract_tags(rest);
-    Some(TodoItem { title, done, tags })
+    let (title_and_time, tags) = extract_tags(rest);
+    let (title, time_secs) = extract_time(&title_and_time);
+    Some(TodoItem { title, done, tags, time_secs })
 }
 
-/// Walks backwards collecting @word tokens. A non-@word token breaks the walk.
+/// Collects trailing @word tokens from right to left; stops at the first non-tag word.
 fn extract_tags(text: &str) -> (String, Vec<String>) {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut tag_count = 0;
@@ -48,6 +49,20 @@ pub fn extract_tags_pub(text: &str) -> (String, Vec<String>) {
     extract_tags(text)
 }
 
+fn extract_time(text: &str) -> (String, u64) {
+    let trimmed = text.trim_end();
+    if let Some(bracket_start) = trimmed.rfind('[')
+        && trimmed.ends_with(']')
+    {
+        let time_str = &trimmed[bracket_start + 1..trimmed.len() - 1];
+        if let Some(secs) = parse_time_str(time_str) {
+            let title = trimmed[..bracket_start].trim_end().to_string();
+            return (title, secs);
+        }
+    }
+    (trimmed.to_string(), 0)
+}
+
 pub fn parse_list(content: &str) -> TodoList {
     let mut name = String::from("Untitled");
     let mut items = Vec::new();
@@ -71,15 +86,19 @@ pub fn serialize_list(list: &TodoList) -> String {
     let mut output = format!("# {}\n\n", list.name);
     for item in &list.items {
         let checkbox = if item.done { "[x]" } else { "[ ]" };
+        let time = format_time(item.time_secs);
+        let time_part = if time.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", time)
+        };
         if item.tags.is_empty() {
-            output.push_str(&format!("- {} {}\n", checkbox, item.title));
+            output.push_str(&format!("- {} {}{}\n", checkbox, item.title, time_part));
         } else {
             let tags: Vec<String> = item.tags.iter().map(|t| format!("@{}", t)).collect();
             output.push_str(&format!(
-                "- {} {} {}\n",
-                checkbox,
-                item.title,
-                tags.join(" ")
+                "- {} {}{} {}\n",
+                checkbox, item.title, time_part, tags.join(" ")
             ));
         }
     }
@@ -107,7 +126,15 @@ pub fn load_lists(dir: &Path) -> io::Result<Vec<TodoList>> {
         return Ok(vec![inbox]);
     }
 
-    md_files.sort_by_key(|entry| entry.file_name());
+    let order = load_order(dir);
+    if order.is_empty() {
+        md_files.sort_by_key(|entry| entry.file_name());
+    } else {
+        md_files.sort_by_key(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            order.iter().position(|o| *o == name).unwrap_or(usize::MAX)
+        });
+    }
 
     let mut lists = Vec::new();
     for entry in md_files {
@@ -132,6 +159,22 @@ pub fn save_all(dir: &Path, lists: &[TodoList]) -> io::Result<()> {
     Ok(())
 }
 
+pub fn save_order(dir: &Path, lists: &[TodoList]) -> io::Result<()> {
+    let filenames: Vec<String> = lists.iter().map(|l| name_to_filename(&l.name)).collect();
+    let content = filenames.join("\n");
+    fs::write(dir.join(".order"), content)
+}
+
+fn load_order(dir: &Path) -> Vec<String> {
+    let path = dir.join(".order");
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
 pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
     let filename = name_to_filename(list_name);
     let path = dir.join(filename);
@@ -139,6 +182,57 @@ pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+pub fn format_time(secs: u64) -> String {
+    if secs == 0 {
+        return String::new();
+    }
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    match (hours, minutes, seconds) {
+        (0, 0, s) => format!("{}s", s),
+        (0, m, 0) => format!("{}m", m),
+        (0, m, s) => format!("{}m{}s", m, s),
+        (h, 0, 0) => format!("{}h", h),
+        (h, 0, s) => format!("{}h{}s", h, s),
+        (h, m, 0) => format!("{}h{}m", h, m),
+        (h, m, s) => format!("{}h{}m{}s", h, m, s),
+    }
+}
+
+pub fn parse_time_str(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut hours: u64 = 0;
+    let mut minutes: u64 = 0;
+    let mut seconds: u64 = 0;
+    let mut num_buf = String::new();
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num_buf.push(c);
+        } else if c == 'h' {
+            hours = num_buf.parse().ok()?;
+            num_buf.clear();
+        } else if c == 'm' {
+            minutes = num_buf.parse().ok()?;
+            num_buf.clear();
+        } else if c == 's' {
+            seconds = num_buf.parse().ok()?;
+            num_buf.clear();
+        } else {
+            return None;
+        }
+    }
+    if !num_buf.is_empty() {
+        return None;
+    }
+    if hours == 0 && minutes == 0 && seconds == 0 {
+        return None;
+    }
+    Some(hours * 3600 + minutes * 60 + seconds)
 }
 
 #[cfg(test)]
@@ -235,11 +329,13 @@ mod tests {
                     title: "Send invoice".to_string(),
                     done: false,
                     tags: vec!["client".to_string()],
+                    time_secs: 0,
                 },
                 TodoItem {
                     title: "Review PR".to_string(),
                     done: true,
                     tags: vec!["code".to_string()],
+                    time_secs: 0,
                 },
             ],
         };
@@ -266,6 +362,119 @@ mod tests {
     }
 
     #[test]
+    fn test_format_time_zero() {
+        assert_eq!(format_time(0), "");
+    }
+
+    #[test]
+    fn test_format_time_minutes_only() {
+        assert_eq!(format_time(2700), "45m");
+    }
+
+    #[test]
+    fn test_format_time_hours_only() {
+        assert_eq!(format_time(7200), "2h");
+    }
+
+    #[test]
+    fn test_format_time_hours_and_minutes() {
+        assert_eq!(format_time(5400), "1h30m");
+    }
+
+    #[test]
+    fn test_parse_time_str_minutes() {
+        assert_eq!(parse_time_str("45m"), Some(2700));
+    }
+
+    #[test]
+    fn test_parse_time_str_hours() {
+        assert_eq!(parse_time_str("2h"), Some(7200));
+    }
+
+    #[test]
+    fn test_parse_time_str_hours_minutes() {
+        assert_eq!(parse_time_str("1h30m"), Some(5400));
+    }
+
+    #[test]
+    fn test_parse_time_str_large_minutes() {
+        assert_eq!(parse_time_str("90m"), Some(5400));
+    }
+
+    #[test]
+    fn test_format_time_seconds_only() {
+        assert_eq!(format_time(30), "30s");
+    }
+
+    #[test]
+    fn test_format_time_minutes_and_seconds() {
+        assert_eq!(format_time(90), "1m30s");
+    }
+
+    #[test]
+    fn test_format_time_hours_minutes_seconds() {
+        assert_eq!(format_time(3661), "1h1m1s");
+    }
+
+    #[test]
+    fn test_parse_time_str_seconds() {
+        assert_eq!(parse_time_str("30s"), Some(30));
+    }
+
+    #[test]
+    fn test_parse_time_str_minutes_seconds() {
+        assert_eq!(parse_time_str("1m30s"), Some(90));
+    }
+
+    #[test]
+    fn test_parse_time_str_invalid() {
+        assert_eq!(parse_time_str("abc"), None);
+        assert_eq!(parse_time_str(""), None);
+    }
+
+    #[test]
+    fn test_parse_todo_line_with_time() {
+        let item = parse_todo_line("- [ ] Buy groceries [45m] @errands").unwrap();
+        assert_eq!(item.title, "Buy groceries");
+        assert_eq!(item.time_secs, 2700);
+        assert_eq!(item.tags, vec!["errands"]);
+    }
+
+    #[test]
+    fn test_parse_todo_line_with_time_no_tags() {
+        let item = parse_todo_line("- [x] Review PR [1h30m]").unwrap();
+        assert_eq!(item.title, "Review PR");
+        assert_eq!(item.time_secs, 5400);
+        assert!(item.tags.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_list_with_time() {
+        let list = TodoList {
+            name: "Work".to_string(),
+            items: vec![
+                TodoItem {
+                    title: "Task A".to_string(),
+                    done: false,
+                    tags: vec!["code".to_string()],
+                    time_secs: 2700,
+                },
+                TodoItem {
+                    title: "Task B".to_string(),
+                    done: true,
+                    tags: vec![],
+                    time_secs: 0,
+                },
+            ],
+        };
+        let output = serialize_list(&list);
+        assert_eq!(
+            output,
+            "# Work\n\n- [ ] Task A [45m] @code\n- [x] Task B\n"
+        );
+    }
+
+    #[test]
     fn test_load_creates_default_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("todos");
@@ -287,6 +496,7 @@ mod tests {
                 title: "Task A".to_string(),
                 done: false,
                 tags: vec!["tag1".to_string()],
+                time_secs: 0,
             }],
         };
         let list_b = TodoList {
@@ -295,16 +505,46 @@ mod tests {
                 title: "Task B".to_string(),
                 done: true,
                 tags: vec![],
+                time_secs: 0,
             }],
         };
 
         save_all(&dir, &[list_a.clone(), list_b.clone()]).unwrap();
         let loaded = load_lists(&dir).unwrap();
         assert_eq!(loaded.len(), 2);
-        // Loaded order is alphabetical by filename
         assert_eq!(loaded[0].name, "Alpha");
         assert_eq!(loaded[1].name, "Beta");
         assert_eq!(loaded[0], list_a);
         assert_eq!(loaded[1], list_b);
+    }
+
+    #[test]
+    fn test_save_and_load_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+
+        let list_a = TodoList::new("Alpha");
+        let list_b = TodoList::new("Beta");
+        let list_c = TodoList::new("Gamma");
+
+        save_all(&dir, &[list_a, list_b, list_c]).unwrap();
+
+        let loaded = load_lists(&dir).unwrap();
+        assert_eq!(loaded[0].name, "Alpha");
+        assert_eq!(loaded[1].name, "Beta");
+        assert_eq!(loaded[2].name, "Gamma");
+
+        let reordered = vec![
+            TodoList::new("Gamma"),
+            TodoList::new("Alpha"),
+            TodoList::new("Beta"),
+        ];
+        save_order(&dir, &reordered).unwrap();
+
+        let loaded = load_lists(&dir).unwrap();
+        assert_eq!(loaded[0].name, "Gamma");
+        assert_eq!(loaded[1].name, "Alpha");
+        assert_eq!(loaded[2].name, "Beta");
     }
 }

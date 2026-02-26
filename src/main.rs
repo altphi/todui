@@ -5,6 +5,7 @@ mod storage;
 mod ui;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyEventKind};
@@ -56,6 +57,16 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal) -> Result<()> {
                 ui::render_help(frame);
             }
         })?;
+
+        let has_event = if app.input_mode == model::InputMode::Focused {
+            event::poll(Duration::from_millis(250))?
+        } else {
+            event::poll(Duration::from_secs(60))?
+        };
+
+        if !has_event {
+            continue;
+        }
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
