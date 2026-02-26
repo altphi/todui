@@ -15,11 +15,18 @@ fn main() -> Result<()> {
     color_eyre::install()?;
 
     let (data_dir, ascii_mode) = parse_args();
-    let mut app = app::App::new(data_dir, ascii_mode)?;
+
+    if let Err(e) = storage::acquire_lock(&data_dir) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
+    let mut app = app::App::new(data_dir.clone(), ascii_mode)?;
 
     let terminal = ratatui::init();
     let result = run(&mut app, terminal);
     ratatui::restore();
+    storage::release_lock(&data_dir);
     result
 }
 

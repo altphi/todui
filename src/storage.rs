@@ -175,6 +175,32 @@ fn load_order(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+pub fn acquire_lock(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let lock_path = dir.join(".lock");
+    if lock_path.exists()
+        && let Ok(pid_str) = fs::read_to_string(&lock_path)
+    {
+        let pid = pid_str.trim();
+        if !pid.is_empty() && Path::new(&format!("/proc/{}", pid)).exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("Another instance is already running (PID {})", pid),
+            ));
+        }
+    }
+    fs::write(&lock_path, std::process::id().to_string())
+}
+
+pub fn release_lock(dir: &Path) {
+    let lock_path = dir.join(".lock");
+    if let Ok(contents) = fs::read_to_string(&lock_path)
+        && contents.trim() == std::process::id().to_string()
+    {
+        let _ = fs::remove_file(lock_path);
+    }
+}
+
 pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
     let filename = name_to_filename(list_name);
     let path = dir.join(filename);
@@ -546,5 +572,58 @@ mod tests {
         assert_eq!(loaded[0].name, "Gamma");
         assert_eq!(loaded[1].name, "Alpha");
         assert_eq!(loaded[2].name, "Beta");
+    }
+
+    #[test]
+    fn test_acquire_lock_creates_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        acquire_lock(&dir).unwrap();
+        let lock_path = dir.join(".lock");
+        assert!(lock_path.exists());
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_acquire_lock_fails_if_pid_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".lock"), std::process::id().to_string()).unwrap();
+        let result = acquire_lock(&dir);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn test_acquire_lock_clears_stale_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".lock"), "999999999").unwrap();
+        acquire_lock(&dir).unwrap();
+        let contents = fs::read_to_string(dir.join(".lock")).unwrap();
+        assert_eq!(contents.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn test_release_lock_removes_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        acquire_lock(&dir).unwrap();
+        assert!(dir.join(".lock").exists());
+        release_lock(&dir);
+        assert!(!dir.join(".lock").exists());
+    }
+
+    #[test]
+    fn test_release_lock_only_removes_own_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".lock"), "12345").unwrap();
+        release_lock(&dir);
+        assert!(dir.join(".lock").exists());
     }
 }
