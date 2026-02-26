@@ -183,6 +183,24 @@ fn load_order(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
+fn is_pid_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(windows)]
+fn is_pid_alive(pid: &str) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .is_ok_and(|o| !String::from_utf8_lossy(&o.stdout).contains("INFO:"))
+}
+
 pub fn acquire_lock(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let lock_path = dir.join(".lock");
@@ -190,7 +208,7 @@ pub fn acquire_lock(dir: &Path) -> io::Result<()> {
         && let Ok(pid_str) = fs::read_to_string(&lock_path)
     {
         let pid = pid_str.trim();
-        if !pid.is_empty() && Path::new(&format!("/proc/{}", pid)).exists() {
+        if !pid.is_empty() && is_pid_alive(pid) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("Another instance is already running (PID {})", pid),
