@@ -395,34 +395,32 @@ impl App {
     }
 
     pub fn move_todo_up(&mut self) {
-        if let Some(real_idx) = self.selected_real_index()
-            && real_idx > 0
-        {
+        let visible = self.visible_items();
+        let vi = self.selected_item_index;
+        if vi > 0 {
+            let real_idx = visible[vi].0;
+            let prev_real_idx = visible[vi - 1].0;
             self.push_undo();
             if let Some(list) = self.current_list_mut() {
-                list.items.swap(real_idx, real_idx - 1);
+                list.items.swap(real_idx, prev_real_idx);
             }
-            if self.selected_item_index > 0 {
-                self.selected_item_index -= 1;
-            }
+            self.selected_item_index -= 1;
             self.save_current_list();
         }
     }
 
     pub fn move_todo_down(&mut self) {
-        if let Some(real_idx) = self.selected_real_index() {
-            let len = self.current_list().map_or(0, |l| l.items.len());
-            if real_idx + 1 < len {
-                self.push_undo();
-                if let Some(list) = self.current_list_mut() {
-                    list.items.swap(real_idx, real_idx + 1);
-                }
-                let visible_len = self.visible_items().len();
-                if self.selected_item_index + 1 < visible_len {
-                    self.selected_item_index += 1;
-                }
-                self.save_current_list();
+        let visible = self.visible_items();
+        let vi = self.selected_item_index;
+        if vi + 1 < visible.len() {
+            let real_idx = visible[vi].0;
+            let next_real_idx = visible[vi + 1].0;
+            self.push_undo();
+            if let Some(list) = self.current_list_mut() {
+                list.items.swap(real_idx, next_real_idx);
             }
+            self.selected_item_index += 1;
+            self.save_current_list();
         }
     }
 
@@ -1264,15 +1262,17 @@ mod tests {
         app.selected_item_index = 1; // Task C
 
         app.move_todo_up();
-        assert_eq!(app.lists[0].items[0].title, "Task A");
-        assert_eq!(app.lists[0].items[1].title, "Task C");
-        assert_eq!(app.lists[0].items[2].title, "Task B");
+        // C swapped with A (visible neighbor), not B (real neighbor)
+        assert_eq!(app.lists[0].items[0].title, "Task C");
+        assert_eq!(app.lists[0].items[1].title, "Task B");
+        assert_eq!(app.lists[0].items[2].title, "Task A");
         assert_eq!(app.selected_item_index, 0);
 
         app.move_todo_down();
-        assert_eq!(app.lists[0].items[0].title, "Task C");
-        assert_eq!(app.lists[0].items[1].title, "Task A");
-        assert_eq!(app.lists[0].items[2].title, "Task B");
+        // C swapped back with A
+        assert_eq!(app.lists[0].items[0].title, "Task A");
+        assert_eq!(app.lists[0].items[1].title, "Task B");
+        assert_eq!(app.lists[0].items[2].title, "Task C");
         assert_eq!(app.selected_item_index, 1);
     }
 
@@ -2520,5 +2520,93 @@ mod tests {
         for item in &app.lists[0].items {
             assert!(!item.done);
         }
+    }
+
+    #[test]
+    fn test_move_todo_down_repeated_with_done_items() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem {
+            title: "A".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "B".to_string(),
+            done: true,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "C".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "D".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+        // Visible order: A(real 0), C(real 2), D(real 3), B(real 1)
+        // Cursor at visible[0] = A
+        assert_eq!(app.selected_item_index, 0);
+
+        // Move A down: should swap A with C (next visible), cursor follows A
+        app.move_todo_down();
+        let visible = app.visible_items();
+        assert_eq!(visible[app.selected_item_index].1.title, "A");
+
+        // Move A down again: should swap A with D (next visible), cursor follows A
+        app.move_todo_down();
+        let visible = app.visible_items();
+        assert_eq!(visible[app.selected_item_index].1.title, "A");
+    }
+
+    #[test]
+    fn test_move_todo_up_repeated_with_done_items() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem {
+            title: "A".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "B".to_string(),
+            done: true,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "C".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "D".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+        // Visible order: A(real 0), C(real 2), D(real 3), B(real 1)
+        // Start cursor at visible[2] = D
+        app.selected_item_index = 2;
+
+        // Move D up: should swap D with C (prev visible), cursor follows D
+        app.move_todo_up();
+        let visible = app.visible_items();
+        assert_eq!(visible[app.selected_item_index].1.title, "D");
+
+        // Move D up again: should swap D with A (prev visible), cursor follows D
+        app.move_todo_up();
+        let visible = app.visible_items();
+        assert_eq!(visible[app.selected_item_index].1.title, "D");
     }
 }

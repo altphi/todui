@@ -513,11 +513,13 @@ mod tests {
         app.selected_item_index = 1; // Task C
 
         handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].items[1].title, "Task C");
+        assert_eq!(app.lists[0].items[0].title, "Task C");
+        assert_eq!(app.lists[0].items[2].title, "Task A");
         assert_eq!(app.selected_item_index, 0);
 
         handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].items[0].title, "Task C");
+        assert_eq!(app.lists[0].items[0].title, "Task A");
+        assert_eq!(app.lists[0].items[2].title, "Task C");
         assert_eq!(app.selected_item_index, 1);
     }
 
