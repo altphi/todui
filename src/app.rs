@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::model::{AppSnapshot, InputMode, Pane, SearchResult, TodoItem, TodoList};
+use crate::model::{AppSnapshot, InputMode, ListType, Pane, SearchResult, TodoItem, TodoList};
 use crate::storage;
 
 pub struct App {
@@ -1066,6 +1066,66 @@ impl App {
 
     fn save_order(&self) {
         let _ = storage::save_order(&self.data_dir, &self.lists);
+    }
+
+    pub fn toggle_list_type(&mut self) {
+        if let Some(list) = self.current_list() {
+            let _ = list;
+            self.push_undo();
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            if let Some(list) = self.current_list_mut() {
+                match list.list_type {
+                    ListType::Normal => {
+                        list.list_type = ListType::Daily;
+                        list.last_reset = Some(today);
+                    }
+                    ListType::Daily => {
+                        list.list_type = ListType::Normal;
+                        list.last_reset = None;
+                    }
+                }
+            }
+            self.save_current_list();
+        }
+    }
+
+    pub fn reset_daily_lists(&mut self) {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        for i in 0..self.lists.len() {
+            if self.lists[i].list_type != ListType::Daily {
+                continue;
+            }
+            let needs_reset = match &self.lists[i].last_reset {
+                None => true,
+                Some(date) => date.as_str() < today.as_str(),
+            };
+            if !needs_reset {
+                continue;
+            }
+            let done_indices: Vec<usize> = self.lists[i]
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.done)
+                .map(|(idx, _)| idx)
+                .collect();
+            if done_indices.is_empty() {
+                self.lists[i].last_reset = Some(today.clone());
+                let _ = storage::save_list(&self.data_dir, &self.lists[i]);
+                continue;
+            }
+            let mut reset_items: Vec<TodoItem> = Vec::new();
+            for &idx in &done_indices {
+                self.lists[i].items[idx].done = false;
+                reset_items.push(self.lists[i].items[idx].clone());
+            }
+            for &idx in done_indices.iter().rev() {
+                self.lists[i].items.remove(idx);
+            }
+            self.lists[i].items.extend(reset_items);
+            self.lists[i].last_reset = Some(today.clone());
+            let _ = storage::save_list(&self.data_dir, &self.lists[i]);
+        }
     }
 
     pub fn quit(&mut self) {
@@ -2365,5 +2425,100 @@ mod tests {
         app.move_to_list_filter = "stale".to_string();
         app.start_move_to_list();
         assert!(app.move_to_list_filter.is_empty());
+    }
+
+    #[test]
+    fn test_toggle_list_type() {
+        let mut app = App::with_lists(vec![TodoList::new("Habits")]);
+        app.active_pane = Pane::Sidebar;
+        assert_eq!(app.lists[0].list_type, ListType::Normal);
+
+        app.toggle_list_type();
+        assert_eq!(app.lists[0].list_type, ListType::Daily);
+        assert!(app.lists[0].last_reset.is_some());
+
+        app.toggle_list_type();
+        assert_eq!(app.lists[0].list_type, ListType::Normal);
+        assert_eq!(app.lists[0].last_reset, None);
+    }
+
+    #[test]
+    fn test_reset_daily_lists() {
+        let mut list = TodoList::new("Daily");
+        list.list_type = ListType::Daily;
+        list.last_reset = Some("2020-01-01".to_string());
+        list.items.push(TodoItem::new("A"));
+        list.items.push(TodoItem::new("B"));
+        list.items[1].done = true;
+        list.items.push(TodoItem::new("C"));
+        list.items[2].done = true;
+
+        let mut app = App::with_lists(vec![list]);
+        app.reset_daily_lists();
+
+        assert!(!app.lists[0].items[0].done);
+        assert!(!app.lists[0].items[1].done);
+        assert!(!app.lists[0].items[2].done);
+        // A stays at top, B and C moved to bottom
+        assert_eq!(app.lists[0].items[0].title, "A");
+        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.lists[0].items[2].title, "C");
+    }
+
+    #[test]
+    fn test_reset_daily_lists_same_day_no_op() {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut list = TodoList::new("Daily");
+        list.list_type = ListType::Daily;
+        list.last_reset = Some(today);
+        list.items.push(TodoItem::new("A"));
+        list.items[0].done = true;
+
+        let mut app = App::with_lists(vec![list]);
+        app.reset_daily_lists();
+
+        assert!(app.lists[0].items[0].done);
+    }
+
+    #[test]
+    fn test_reset_daily_lists_skips_normal() {
+        let mut list = TodoList::new("Normal");
+        list.last_reset = Some("2020-01-01".to_string());
+        list.items.push(TodoItem::new("A"));
+        list.items[0].done = true;
+
+        let mut app = App::with_lists(vec![list]);
+        app.reset_daily_lists();
+
+        assert!(app.lists[0].items[0].done);
+    }
+
+    #[test]
+    fn test_reset_daily_preserves_order() {
+        let mut list = TodoList::new("Daily");
+        list.list_type = ListType::Daily;
+        list.last_reset = Some("2020-01-01".to_string());
+        // Items: A(not done), B(done), C(not done), D(done), E(not done)
+        list.items.push(TodoItem::new("A"));
+        list.items.push(TodoItem::new("B"));
+        list.items[1].done = true;
+        list.items.push(TodoItem::new("C"));
+        list.items.push(TodoItem::new("D"));
+        list.items[3].done = true;
+        list.items.push(TodoItem::new("E"));
+
+        let mut app = App::with_lists(vec![list]);
+        app.reset_daily_lists();
+
+        // Not-done items stay in place, done items (B, D) move to end in order
+        assert_eq!(app.lists[0].items[0].title, "A");
+        assert_eq!(app.lists[0].items[1].title, "C");
+        assert_eq!(app.lists[0].items[2].title, "E");
+        assert_eq!(app.lists[0].items[3].title, "B");
+        assert_eq!(app.lists[0].items[4].title, "D");
+        // All should be not done
+        for item in &app.lists[0].items {
+            assert!(!item.done);
+        }
     }
 }

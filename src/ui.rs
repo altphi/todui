@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::model::{InputMode, Pane, SearchResult};
+use crate::model::{InputMode, ListType, Pane, SearchResult};
 
 pub fn render(app: &App, frame: &mut Frame) {
     let outer = Layout::default()
@@ -24,7 +24,10 @@ pub fn render(app: &App, frame: &mut Frame) {
     let longest_list_name = app
         .lists
         .iter()
-        .map(|l| l.name.len() as u16)
+        .map(|l| {
+            let extra = if l.list_type == ListType::Daily { 4 } else { 0 };
+            l.name.len() as u16 + extra
+        })
         .max()
         .unwrap_or(4);
     // 2 border + 2 inner padding + 2 text padding + 2 balance + name length, minimum 14
@@ -104,7 +107,12 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .skip(offset)
         .take(visible_height)
         .map(|(i, list)| {
-            let content = format!("  {}", list.name);
+            let indicator = if list.list_type == ListType::Daily {
+                if app.ascii_mode { " (d)" } else { " \u{21bb}" }
+            } else {
+                ""
+            };
+            let content = format!("  {}{}", list.name, indicator);
             let style = if i == app.selected_list_index {
                 Style::default()
                     .fg(Color::White)
@@ -293,7 +301,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 match app.active_pane {
                     Pane::Sidebar => {
                         format!(
-                            "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  Del: delete  Tab: todos  ?: help{}",
+                            "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  d: daily  Del: delete  Tab: todos  ?: help{}",
                             filter_indicator
                         )
                     }
@@ -481,7 +489,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(65, 34, frame.area());
+    let area = centered_rect(65, 35, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -525,6 +533,7 @@ pub fn render_help(frame: &mut Frame) {
         section("Lists"),
         help_row("n", "Add new list (sidebar)"),
         help_row("Enter", "Rename list (sidebar)"),
+        help_row("d", "Toggle daily (auto-reset)"),
         help_row("Shift+K/J / Alt+arrows", "Move up / down"),
         help_row("Alt+Super+arrows", "Move to top / bottom"),
         help_row("Del / Backspace", "Delete list (sidebar)"),

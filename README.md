@@ -18,6 +18,7 @@ TUI todo + time tracking in rust, using [ratatui](https://ratatui.rs).
 - ASCII mode fallback
 - File-based persistence (Markdown)
 - Single-instance lock file
+- Items in lists marked as _daily_ will reset each day
 
 ## License
 

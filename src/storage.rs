@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::model::{TodoItem, TodoList};
+use crate::model::{ListType, TodoItem, TodoList};
 
 pub fn parse_todo_line(line: &str) -> Option<TodoItem> {
     let trimmed = line.trim_start();
@@ -71,6 +71,8 @@ fn extract_time(text: &str) -> (String, u64) {
 pub fn parse_list(content: &str) -> TodoList {
     let mut name = String::from("Untitled");
     let mut items = Vec::new();
+    let mut list_type = ListType::Normal;
+    let mut last_reset = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -79,16 +81,35 @@ pub fn parse_list(content: &str) -> TodoList {
             if !heading.is_empty() {
                 name = heading.to_string();
             }
+        } else if trimmed == "<!-- type: daily -->" {
+            list_type = ListType::Daily;
+        } else if let Some(date) = trimmed
+            .strip_prefix("<!-- last-reset: ")
+            .and_then(|s| s.strip_suffix(" -->"))
+        {
+            last_reset = Some(date.to_string());
         } else if let Some(item) = parse_todo_line(line) {
             items.push(item);
         }
     }
 
-    TodoList { name, items }
+    TodoList {
+        name,
+        items,
+        list_type,
+        last_reset,
+    }
 }
 
 pub fn serialize_list(list: &TodoList) -> String {
-    let mut output = format!("# {}\n\n", list.name);
+    let mut output = format!("# {}\n", list.name);
+    if list.list_type == ListType::Daily {
+        output.push_str("<!-- type: daily -->\n");
+    }
+    if let Some(ref date) = list.last_reset {
+        output.push_str(&format!("<!-- last-reset: {} -->\n", date));
+    }
+    output.push('\n');
     for item in &list.items {
         let checkbox = if item.done { "[x]" } else { "[ ]" };
         let time = format_time(item.time_secs);
@@ -374,23 +395,21 @@ mod tests {
 
     #[test]
     fn test_serialize_list() {
-        let list = TodoList {
-            name: "Work".to_string(),
-            items: vec![
-                TodoItem {
-                    title: "Send invoice".to_string(),
-                    done: false,
-                    tags: vec!["client".to_string()],
-                    time_secs: 0,
-                },
-                TodoItem {
-                    title: "Review PR".to_string(),
-                    done: true,
-                    tags: vec!["code".to_string()],
-                    time_secs: 0,
-                },
-            ],
-        };
+        let mut list = TodoList::new("Work");
+        list.items = vec![
+            TodoItem {
+                title: "Send invoice".to_string(),
+                done: false,
+                tags: vec!["client".to_string()],
+                time_secs: 0,
+            },
+            TodoItem {
+                title: "Review PR".to_string(),
+                done: true,
+                tags: vec!["code".to_string()],
+                time_secs: 0,
+            },
+        ];
         let output = serialize_list(&list);
         assert_eq!(
             output,
@@ -502,23 +521,21 @@ mod tests {
 
     #[test]
     fn test_serialize_list_with_time() {
-        let list = TodoList {
-            name: "Work".to_string(),
-            items: vec![
-                TodoItem {
-                    title: "Task A".to_string(),
-                    done: false,
-                    tags: vec!["code".to_string()],
-                    time_secs: 2700,
-                },
-                TodoItem {
-                    title: "Task B".to_string(),
-                    done: true,
-                    tags: vec![],
-                    time_secs: 0,
-                },
-            ],
-        };
+        let mut list = TodoList::new("Work");
+        list.items = vec![
+            TodoItem {
+                title: "Task A".to_string(),
+                done: false,
+                tags: vec!["code".to_string()],
+                time_secs: 2700,
+            },
+            TodoItem {
+                title: "Task B".to_string(),
+                done: true,
+                tags: vec![],
+                time_secs: 0,
+            },
+        ];
         let output = serialize_list(&list);
         assert_eq!(output, "# Work\n\n- [ ] Task A [45m] @code\n- [x] Task B\n");
     }
@@ -539,24 +556,20 @@ mod tests {
         let dir = tmp.path().join("todos");
         fs::create_dir_all(&dir).unwrap();
 
-        let list_a = TodoList {
-            name: "Alpha".to_string(),
-            items: vec![TodoItem {
-                title: "Task A".to_string(),
-                done: false,
-                tags: vec!["tag1".to_string()],
-                time_secs: 0,
-            }],
-        };
-        let list_b = TodoList {
-            name: "Beta".to_string(),
-            items: vec![TodoItem {
-                title: "Task B".to_string(),
-                done: true,
-                tags: vec![],
-                time_secs: 0,
-            }],
-        };
+        let mut list_a = TodoList::new("Alpha");
+        list_a.items.push(TodoItem {
+            title: "Task A".to_string(),
+            done: false,
+            tags: vec!["tag1".to_string()],
+            time_secs: 0,
+        });
+        let mut list_b = TodoList::new("Beta");
+        list_b.items.push(TodoItem {
+            title: "Task B".to_string(),
+            done: true,
+            tags: vec![],
+            time_secs: 0,
+        });
 
         save_all(&dir, &[list_a.clone(), list_b.clone()]).unwrap();
         let loaded = load_lists(&dir).unwrap();
@@ -648,5 +661,43 @@ mod tests {
         fs::write(dir.join(".lock"), "12345").unwrap();
         release_lock(&dir);
         assert!(dir.join(".lock").exists());
+    }
+
+    #[test]
+    fn test_serialize_daily_list() {
+        let mut list = TodoList::new("Daily Tasks");
+        list.list_type = ListType::Daily;
+        list.last_reset = Some("2026-02-26".to_string());
+        list.items.push(TodoItem {
+            title: "Exercise".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let output = serialize_list(&list);
+        let reparsed = parse_list(&output);
+        assert_eq!(reparsed.list_type, ListType::Daily);
+        assert_eq!(reparsed.last_reset, Some("2026-02-26".to_string()));
+        assert_eq!(reparsed.items.len(), 1);
+        assert_eq!(reparsed.items[0].title, "Exercise");
+    }
+
+    #[test]
+    fn test_parse_daily_list() {
+        let md = "# Habits\n<!-- type: daily -->\n<!-- last-reset: 2026-02-25 -->\n\n- [ ] Meditate\n- [x] Read\n";
+        let list = parse_list(md);
+        assert_eq!(list.name, "Habits");
+        assert_eq!(list.list_type, ListType::Daily);
+        assert_eq!(list.last_reset, Some("2026-02-25".to_string()));
+        assert_eq!(list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_normal_list_unchanged() {
+        let md = "# Work\n\n- [ ] Task A\n- [x] Task B\n";
+        let list = parse_list(md);
+        assert_eq!(list.list_type, ListType::Normal);
+        assert_eq!(list.last_reset, None);
+        assert_eq!(list.items.len(), 2);
     }
 }

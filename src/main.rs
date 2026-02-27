@@ -22,6 +22,7 @@ fn main() -> Result<()> {
     }
 
     let mut app = app::App::new(data_dir.clone(), ascii_mode)?;
+    app.reset_daily_lists();
 
     let terminal = ratatui::init();
     let result = run(&mut app, terminal);

@@ -1,3 +1,10 @@
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ListType {
+    #[default]
+    Normal,
+    Daily,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TodoItem {
     pub title: String,
@@ -10,6 +17,8 @@ pub struct TodoItem {
 pub struct TodoList {
     pub name: String,
     pub items: Vec<TodoItem>,
+    pub list_type: ListType,
+    pub last_reset: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,6 +73,8 @@ impl TodoList {
         Self {
             name: name.into(),
             items: Vec::new(),
+            list_type: ListType::Normal,
+            last_reset: None,
         }
     }
 }
@@ -91,5 +102,7 @@ mod tests {
         let list = TodoList::new("Work");
         assert_eq!(list.name, "Work");
         assert!(list.items.is_empty());
+        assert_eq!(list.list_type, ListType::Normal);
+        assert_eq!(list.last_reset, None);
     }
 }

@@ -180,6 +180,9 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
 
 fn handle_sidebar(app: &mut App, key: KeyEvent) {
     match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+            app.toggle_list_type();
+        }
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
             app.start_input(InputMode::AddingList, "");
         }
@@ -1093,5 +1096,16 @@ mod tests {
         assert!(!app.selected_items.is_empty());
         handle_key(&mut app, key(KeyCode::Esc));
         assert!(app.selected_items.is_empty());
+    }
+
+    #[test]
+    fn test_sidebar_d_toggles_list_type() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Sidebar;
+        assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.lists[0].list_type, crate::model::ListType::Daily);
+        handle_key(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
     }
 }
