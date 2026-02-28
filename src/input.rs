@@ -16,16 +16,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
-    if app.pending_g {
-        app.pending_g = false;
-        if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::NONE {
-            app.jump_to_first();
-            return;
-        }
-    }
+    let modifiers = key.modifiers;
 
-    match (key.modifiers, key.code) {
-        (_, KeyCode::Char('q')) => {
+    match (modifiers, key.code) {
+        (KeyModifiers::ALT, KeyCode::Char('q')) => {
             app.quit();
             return;
         }
@@ -37,23 +31,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.toggle_pane();
             return;
         }
-        (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+        (KeyModifiers::NONE, KeyCode::Up) => {
             app.move_selection_up();
             return;
         }
-        (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
+        (KeyModifiers::NONE, KeyCode::Down) => {
             app.move_selection_down();
             return;
         }
-        (KeyModifiers::NONE, KeyCode::Char('g')) => {
-            app.pending_g = true;
-            return;
-        }
-        (KeyModifiers::SHIFT, KeyCode::Char('G')) => {
-            app.jump_to_last();
-            return;
-        }
-        (KeyModifiers::NONE, KeyCode::Char('u')) => {
+        (KeyModifiers::ALT, KeyCode::Char('u')) => {
             app.undo();
             return;
         }
@@ -79,8 +65,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             }
             return;
         }
-        (KeyModifiers::NONE, KeyCode::Char('/')) => {
-            app.start_search();
+        (KeyModifiers::NONE, KeyCode::Home) => {
+            app.jump_to_first();
+            return;
+        }
+        (KeyModifiers::NONE, KeyCode::End) => {
+            app.jump_to_last();
             return;
         }
         _ => {}
@@ -95,21 +85,16 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
     let tag_view = app.is_tag_view();
     match (key.modifiers, key.code) {
-        (_, KeyCode::Char(' ')) => {
+        (KeyModifiers::ALT, KeyCode::Char('k')) => {
             app.toggle_done_selected();
         }
-        (KeyModifiers::NONE, KeyCode::Char('n')) => {
-            if !tag_view {
-                app.start_input(InputMode::AddingItem, "");
-            }
-        }
-        (_, KeyCode::Enter) => {
+        (KeyModifiers::NONE, KeyCode::Enter) => {
             if let Some((li, ii)) = app.resolve_selected_item() {
                 let title = app.lists[li].items[ii].title.clone();
                 app.start_input(InputMode::EditingItem, &title);
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char('t')) => {
+        (KeyModifiers::ALT, KeyCode::Char('t')) => {
             if let Some((li, ii)) = app.resolve_selected_item() {
                 let tags_str = app.lists[li].items[ii]
                     .tags
@@ -120,7 +105,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.start_input(InputMode::EditingTags, &tags_str);
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char('x')) => {
+        (KeyModifiers::ALT, KeyCode::Char('x')) => {
             if !tag_view {
                 app.toggle_select_current();
             }
@@ -132,7 +117,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.delete_selected();
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char('m')) => {
+        (KeyModifiers::ALT, KeyCode::Char('m')) => {
             if !tag_view {
                 app.start_move_to_list();
             }
@@ -140,16 +125,12 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
         (KeyModifiers::NONE, KeyCode::Esc) => {
             app.clear_selection();
         }
-        (KeyModifiers::SHIFT, KeyCode::Up)
-        | (KeyModifiers::SHIFT, KeyCode::Char('K'))
-        | (KeyModifiers::ALT, KeyCode::Up) => {
+        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Up) => {
             if !tag_view {
                 app.move_todo_up();
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Down)
-        | (KeyModifiers::SHIFT, KeyCode::Char('J'))
-        | (KeyModifiers::ALT, KeyCode::Down) => {
+        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::ALT, KeyCode::Down) => {
             if !tag_view {
                 app.move_todo_down();
             }
@@ -164,18 +145,18 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.move_todo_to_bottom();
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
+        (m, KeyCode::Char('D')) if m.contains(KeyModifiers::ALT) => {
             app.toggle_show_done();
         }
-        (KeyModifiers::SHIFT, KeyCode::Char('F')) => {
+        (KeyModifiers::ALT, KeyCode::Char('f')) => {
             app.start_focus();
         }
-        (KeyModifiers::NONE, KeyCode::Char('f')) => {
+        (m, KeyCode::Char('F')) if m.contains(KeyModifiers::ALT) => {
             if !tag_view {
                 app.start_filter();
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Char('T')) => {
+        (m, KeyCode::Char('T')) if m.contains(KeyModifiers::ALT) => {
             if let Some((li, ii)) = app.resolve_selected_item() {
                 let time_str = crate::storage::format_time(app.lists[li].items[ii].time_secs);
                 let prefill = if time_str.is_empty() {
@@ -186,22 +167,37 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.start_input(InputMode::EditingTime, &prefill);
             }
         }
+        (KeyModifiers::NONE, KeyCode::Char(' ')) => {
+            if !tag_view {
+                app.start_input(InputMode::AddingItem, "");
+            }
+        }
+        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+            app.start_search();
+            app.input_insert_char(c);
+            app.update_search_results();
+        }
         _ => {}
     }
 }
 
 fn handle_sidebar(app: &mut App, key: KeyEvent) {
     if app.is_tag_view() {
+        if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code) {
+            app.start_search();
+            app.input_insert_char(c);
+            app.update_search_results();
+        }
         return;
     }
     match (key.modifiers, key.code) {
-        (KeyModifiers::NONE, KeyCode::Char('d')) => {
+        (KeyModifiers::ALT, KeyCode::Char('d')) => {
             app.toggle_list_type();
         }
-        (KeyModifiers::NONE, KeyCode::Char('n')) => {
+        (KeyModifiers::ALT, KeyCode::Char('n')) => {
             app.start_input(InputMode::AddingList, "");
         }
-        (_, KeyCode::Enter) => {
+        (KeyModifiers::NONE, KeyCode::Enter) => {
             if let Some(list) = app.current_list() {
                 let name = list.name.clone();
                 app.start_input(InputMode::RenamingList, &name);
@@ -212,14 +208,10 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
                 app.input_mode = InputMode::ConfirmDelete;
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Up)
-        | (KeyModifiers::SHIFT, KeyCode::Char('K'))
-        | (KeyModifiers::ALT, KeyCode::Up) => {
+        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Up) => {
             app.move_list_up();
         }
-        (KeyModifiers::SHIFT, KeyCode::Down)
-        | (KeyModifiers::SHIFT, KeyCode::Char('J'))
-        | (KeyModifiers::ALT, KeyCode::Down) => {
+        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::ALT, KeyCode::Down) => {
             app.move_list_down();
         }
         (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
@@ -227,6 +219,11 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
         }
         (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
             app.move_list_to_bottom();
+        }
+        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+            app.start_search();
+            app.input_insert_char(c);
+            app.update_search_results();
         }
         _ => {}
     }
@@ -242,7 +239,11 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Backspace => {
             app.input_delete_char();
-            app.update_search_results();
+            if app.input_buffer.is_empty() {
+                app.cancel_input();
+            } else {
+                app.update_search_results();
+            }
         }
         KeyCode::Up => {
             app.search_select_prev();
@@ -337,10 +338,10 @@ fn handle_filter_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char(' ') => {
             app.toggle_filter_tag();
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.filter_move_up();
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             app.filter_move_down();
         }
         _ => {}
@@ -424,11 +425,15 @@ mod tests {
         KeyEvent::new(code, modifiers)
     }
 
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
     #[test]
-    fn test_quit_q() {
+    fn test_quit_alt_q() {
         let mut app = sample_app();
         assert!(app.running);
-        handle_key(&mut app, key(KeyCode::Char('q')));
+        handle_key(&mut app, alt(KeyCode::Char('q')));
         assert!(!app.running);
     }
 
@@ -461,13 +466,13 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down));
         assert_eq!(app.selected_item_index, 1);
 
-        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Down));
         assert_eq!(app.selected_item_index, 2);
 
         handle_key(&mut app, key(KeyCode::Up));
         assert_eq!(app.selected_item_index, 1);
 
-        handle_key(&mut app, key(KeyCode::Char('k')));
+        handle_key(&mut app, key(KeyCode::Up));
         assert_eq!(app.selected_item_index, 0);
     }
 
@@ -476,14 +481,14 @@ mod tests {
         let mut app = sample_app();
         assert!(!app.lists[0].items[0].done);
 
-        handle_key(&mut app, key(KeyCode::Char(' ')));
+        handle_key(&mut app, alt(KeyCode::Char('k')));
         assert!(app.lists[0].items[0].done);
     }
 
     #[test]
     fn test_add_item_flow() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         assert_eq!(app.input_mode, InputMode::AddingItem);
 
         for c in "New task".chars() {
@@ -508,7 +513,7 @@ mod tests {
     #[test]
     fn test_edit_tags_flow() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('t')));
+        handle_key(&mut app, alt(KeyCode::Char('t')));
         assert_eq!(app.input_mode, InputMode::EditingTags);
         assert_eq!(app.input_buffer, "@code");
     }
@@ -623,7 +628,7 @@ mod tests {
         assert!(app.show_done);
         handle_key(
             &mut app,
-            key_with_mod(KeyCode::Char('D'), KeyModifiers::SHIFT),
+            key_with_mod(KeyCode::Char('D'), KeyModifiers::ALT | KeyModifiers::SHIFT),
         );
         assert!(!app.show_done);
     }
@@ -636,7 +641,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.lists[0].items.len(), 2);
 
-        handle_key(&mut app, key(KeyCode::Char('u')));
+        handle_key(&mut app, alt(KeyCode::Char('u')));
         assert_eq!(app.lists[0].items.len(), 3);
 
         handle_key(
@@ -656,7 +661,7 @@ mod tests {
     fn test_sidebar_add_list() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, alt(KeyCode::Char('n')));
         assert_eq!(app.input_mode, InputMode::AddingList);
     }
 
@@ -703,10 +708,7 @@ mod tests {
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 1;
 
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('K'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::SHIFT));
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
@@ -718,10 +720,7 @@ mod tests {
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 0;
 
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('J'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::SHIFT));
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.selected_list_index, 1);
@@ -739,7 +738,7 @@ mod tests {
     #[test]
     fn test_input_mode_cancel() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         assert_eq!(app.input_mode, InputMode::AddingItem);
 
         handle_key(&mut app, key(KeyCode::Esc));
@@ -749,7 +748,7 @@ mod tests {
     #[test]
     fn test_input_mode_backspace() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('a')));
         handle_key(&mut app, key(KeyCode::Char('b')));
         assert_eq!(app.input_buffer, "ab");
@@ -761,7 +760,7 @@ mod tests {
     #[test]
     fn test_input_mode_cursor_movement() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('a')));
         handle_key(&mut app, key(KeyCode::Char('b')));
         assert_eq!(app.input_cursor, 2);
@@ -774,17 +773,17 @@ mod tests {
     }
 
     #[test]
-    fn test_search_mode_entry() {
+    fn test_type_ahead_search_entry() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('/')));
+        handle_key(&mut app, key(KeyCode::Char('T')));
         assert_eq!(app.input_mode, InputMode::Searching);
-        assert_eq!(app.input_buffer, "");
+        assert_eq!(app.input_buffer, "T");
+        assert!(!app.search_results.is_empty());
     }
 
     #[test]
-    fn test_search_mode_typing() {
+    fn test_type_ahead_search_typing() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('/')));
         handle_key(&mut app, key(KeyCode::Char('T')));
         handle_key(&mut app, key(KeyCode::Char('a')));
         assert_eq!(app.input_buffer, "Ta");
@@ -794,7 +793,6 @@ mod tests {
     #[test]
     fn test_search_mode_cancel() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('/')));
         handle_key(&mut app, key(KeyCode::Char('T')));
         assert_eq!(app.input_mode, InputMode::Searching);
 
@@ -807,7 +805,6 @@ mod tests {
     #[test]
     fn test_search_mode_select() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('/')));
         for c in "Personal".chars() {
             handle_key(&mut app, key(KeyCode::Char(c)));
         }
@@ -819,22 +816,27 @@ mod tests {
     }
 
     #[test]
+    fn test_search_backspace_to_empty_returns_to_normal() {
+        let mut app = sample_app();
+        handle_key(&mut app, key(KeyCode::Char('T')));
+        assert_eq!(app.input_mode, InputMode::Searching);
+
+        handle_key(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.input_buffer, "");
+    }
+
+    #[test]
     fn test_focus_mode_entry() {
         let mut app = sample_app();
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, alt(KeyCode::Char('f')));
         assert_eq!(app.input_mode, InputMode::Focused);
     }
 
     #[test]
     fn test_focus_mode_stop() {
         let mut app = sample_app();
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, alt(KeyCode::Char('f')));
         assert_eq!(app.input_mode, InputMode::Focused);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -843,10 +845,7 @@ mod tests {
     #[test]
     fn test_focus_mode_pause() {
         let mut app = sample_app();
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('F'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, alt(KeyCode::Char('f')));
         assert!(app.focus_start.is_some());
         handle_key(&mut app, key(KeyCode::Char(' ')));
         assert!(app.focus_start.is_none());
@@ -860,7 +859,7 @@ mod tests {
         app.lists[0].items[0].time_secs = 3600;
         handle_key(
             &mut app,
-            key_with_mod(KeyCode::Char('T'), KeyModifiers::SHIFT),
+            key_with_mod(KeyCode::Char('T'), KeyModifiers::ALT | KeyModifiers::SHIFT),
         );
         assert_eq!(app.input_mode, InputMode::EditingTime);
         assert_eq!(app.input_buffer, "1h");
@@ -869,14 +868,20 @@ mod tests {
     #[test]
     fn test_filter_mode_entry() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('f')));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        );
         assert_eq!(app.input_mode, InputMode::FilteringTags);
     }
 
     #[test]
     fn test_filter_mode_toggle_and_confirm() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('f')));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        );
         assert_eq!(app.input_mode, InputMode::FilteringTags);
 
         handle_key(&mut app, key(KeyCode::Char(' ')));
@@ -890,7 +895,10 @@ mod tests {
     #[test]
     fn test_filter_mode_cancel() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('f')));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        );
         handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -901,20 +909,23 @@ mod tests {
     fn test_filter_mode_navigation() {
         let mut app = sample_app();
         app.lists[0].items[1].tags = vec!["review".to_string()];
-        handle_key(&mut app, key(KeyCode::Char('f')));
+        handle_key(
+            &mut app,
+            key_with_mod(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+        );
         assert_eq!(app.filter_cursor, 0);
 
-        handle_key(&mut app, key(KeyCode::Char('j')));
+        handle_key(&mut app, key(KeyCode::Down));
         assert_eq!(app.filter_cursor, 1);
 
-        handle_key(&mut app, key(KeyCode::Char('k')));
+        handle_key(&mut app, key(KeyCode::Up));
         assert_eq!(app.filter_cursor, 0);
     }
 
     #[test]
     fn test_autocomplete_tab_accepts() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('@')));
         assert!(app.autocomplete_active);
 
@@ -926,7 +937,7 @@ mod tests {
     #[test]
     fn test_autocomplete_esc_dismisses() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('@')));
         assert!(app.autocomplete_active);
 
@@ -936,29 +947,23 @@ mod tests {
     }
 
     #[test]
-    fn test_gg_jumps_to_first_main() {
+    fn test_home_jumps_to_first_main() {
         let mut app = sample_app();
         app.selected_item_index = 2;
-        handle_key(&mut app, key(KeyCode::Char('g')));
-        assert!(app.pending_g);
-        handle_key(&mut app, key(KeyCode::Char('g')));
-        assert!(!app.pending_g);
+        handle_key(&mut app, key(KeyCode::Home));
         assert_eq!(app.selected_item_index, 0);
     }
 
     #[test]
-    fn test_shift_g_jumps_to_last_main() {
+    fn test_end_jumps_to_last_main() {
         let mut app = sample_app();
         assert_eq!(app.selected_item_index, 0);
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('G'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, key(KeyCode::End));
         assert_eq!(app.selected_item_index, 2);
     }
 
     #[test]
-    fn test_gg_jumps_to_first_sidebar() {
+    fn test_home_jumps_to_first_sidebar() {
         let mut app = App::with_lists(vec![
             TodoList::new("Alpha"),
             TodoList::new("Beta"),
@@ -967,14 +972,13 @@ mod tests {
         app.active_pane = Pane::Sidebar;
         app.selected_sidebar_index = 2;
         app.selected_list_index = 2;
-        handle_key(&mut app, key(KeyCode::Char('g')));
-        handle_key(&mut app, key(KeyCode::Char('g')));
+        handle_key(&mut app, key(KeyCode::Home));
         assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
     }
 
     #[test]
-    fn test_shift_g_jumps_to_last_sidebar() {
+    fn test_end_jumps_to_last_sidebar() {
         let mut app = App::with_lists(vec![
             TodoList::new("Alpha"),
             TodoList::new("Beta"),
@@ -982,22 +986,8 @@ mod tests {
         ]);
         app.active_pane = Pane::Sidebar;
         assert_eq!(app.selected_list_index, 0);
-        handle_key(
-            &mut app,
-            key_with_mod(KeyCode::Char('G'), KeyModifiers::SHIFT),
-        );
+        handle_key(&mut app, key(KeyCode::End));
         assert_eq!(app.selected_list_index, 2);
-    }
-
-    #[test]
-    fn test_pending_g_cleared_by_other_key() {
-        let mut app = sample_app();
-        app.selected_item_index = 2;
-        handle_key(&mut app, key(KeyCode::Char('g')));
-        assert!(app.pending_g);
-        handle_key(&mut app, key(KeyCode::Char('k')));
-        assert!(!app.pending_g);
-        assert_eq!(app.selected_item_index, 1);
     }
 
     #[test]
@@ -1042,7 +1032,7 @@ mod tests {
     fn test_autocomplete_up_down_navigates() {
         let mut app = sample_app();
         app.lists[0].items[1].tags = vec!["cooking".to_string()];
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('@')));
         handle_key(&mut app, key(KeyCode::Char('c')));
         assert!(app.autocomplete_active);
@@ -1056,11 +1046,11 @@ mod tests {
     }
 
     #[test]
-    fn test_x_toggles_selection_in_main() {
+    fn test_alt_x_toggles_selection_in_main() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, alt(KeyCode::Char('x')));
         assert!(!app.selected_items.is_empty());
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, alt(KeyCode::Char('x')));
         assert!(app.selected_items.is_empty());
     }
 
@@ -1082,16 +1072,16 @@ mod tests {
     }
 
     #[test]
-    fn test_m_starts_move_to_list() {
+    fn test_alt_m_starts_move_to_list() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('m')));
+        handle_key(&mut app, alt(KeyCode::Char('m')));
         assert_eq!(app.input_mode, InputMode::MovingToList);
     }
 
     #[test]
     fn test_move_to_list_mode_enter_confirms() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('m')));
+        handle_key(&mut app, alt(KeyCode::Char('m')));
         assert_eq!(app.input_mode, InputMode::MovingToList);
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1101,7 +1091,7 @@ mod tests {
     #[test]
     fn test_move_to_list_mode_esc_cancels() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('m')));
+        handle_key(&mut app, alt(KeyCode::Char('m')));
         assert_eq!(app.input_mode, InputMode::MovingToList);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1111,20 +1101,20 @@ mod tests {
     #[test]
     fn test_esc_clears_selection_in_main() {
         let mut app = sample_app();
-        handle_key(&mut app, key(KeyCode::Char('x')));
+        handle_key(&mut app, alt(KeyCode::Char('x')));
         assert!(!app.selected_items.is_empty());
         handle_key(&mut app, key(KeyCode::Esc));
         assert!(app.selected_items.is_empty());
     }
 
     #[test]
-    fn test_sidebar_d_toggles_list_type() {
+    fn test_sidebar_alt_d_toggles_list_type() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
         assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
-        handle_key(&mut app, key(KeyCode::Char('d')));
+        handle_key(&mut app, alt(KeyCode::Char('d')));
         assert_eq!(app.lists[0].list_type, crate::model::ListType::Daily);
-        handle_key(&mut app, key(KeyCode::Char('d')));
+        handle_key(&mut app, alt(KeyCode::Char('d')));
         assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
     }
 
@@ -1172,7 +1162,7 @@ mod tests {
         let mut app = App::with_lists(vec![work]);
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
-        handle_key(&mut app, key(KeyCode::Char('n')));
+        handle_key(&mut app, key(KeyCode::Char(' ')));
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
@@ -1188,7 +1178,7 @@ mod tests {
         let mut app = App::with_lists(vec![work]);
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
-        handle_key(&mut app, key(KeyCode::Char(' ')));
+        handle_key(&mut app, alt(KeyCode::Char('k')));
         assert!(app.lists[0].items[0].done);
     }
 

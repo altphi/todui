@@ -486,9 +486,11 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         }
         InputMode::Focused => "  Space: pause/resume  Esc: stop".to_string(),
         InputMode::FilteringTags => {
-            "  j/k: navigate  Space: toggle  Enter: apply  Esc: cancel".to_string()
+            "  \u{2191}/\u{2193}: navigate  Space: toggle  Enter: apply  Esc: cancel".to_string()
         }
-        InputMode::MovingToList => "  j/k: navigate  Enter: move  Esc: cancel".to_string(),
+        InputMode::MovingToList => {
+            "  \u{2191}/\u{2193}: navigate  Enter: move  Esc: cancel".to_string()
+        }
         InputMode::AddingItem
         | InputMode::AddingList
         | InputMode::RenamingList
@@ -504,7 +506,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             };
             if !app.selected_items.is_empty() {
                 format!(
-                    "  {} selected  Del: delete  Space: toggle done  m: move  Esc: clear{}",
+                    "  {} selected  Del: delete  \u{2325}K: toggle done  \u{2325}M: move  Esc: clear{}",
                     app.selected_items.len(),
                     filter_indicator
                 )
@@ -512,10 +514,13 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 match app.active_pane {
                     Pane::Sidebar => {
                         if app.is_tag_view() {
-                            format!("  j/k: navigate  Tab: todos  ?: help{}", filter_indicator)
+                            format!(
+                                "  \u{2191}/\u{2193}: navigate  Tab: todos  type: search{}",
+                                filter_indicator
+                            )
                         } else {
                             format!(
-                                "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  d: daily  Del: delete  Tab: todos  ?: help{}",
+                                "  \u{2191}/\u{2193}: navigate  \u{21e7}\u{2191}/\u{2193}: reorder  \u{2325}N: new  Enter: rename  \u{2325}D: daily  Del: delete  Tab: todos  type: search{}",
                                 filter_indicator
                             )
                         }
@@ -523,12 +528,12 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                     Pane::Main => {
                         if app.is_tag_view() {
                             format!(
-                                "  j/k: navigate  Space: toggle  Enter: edit  Del: delete  ?: help{}",
+                                "  \u{2191}/\u{2193}: navigate  \u{2325}K: toggle  Enter: edit  Del: delete  type: search{}",
                                 filter_indicator
                             )
                         } else {
                             format!(
-                                "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: select  Del: delete  m: move  ?: help{}",
+                                "  \u{2191}/\u{2193}: navigate  \u{2325}K: toggle  Space: new  Enter: edit  \u{2325}X: select  Del: delete  \u{2325}M: move  type: search{}",
                                 filter_indicator
                             )
                         }
@@ -778,40 +783,47 @@ pub fn render_help(frame: &mut Frame) {
 
     let help_text = vec![
         section("Navigation"),
-        help_row("j / k", "Move down / up"),
+        help_row("\u{2191} / \u{2193}", "Move up / down"),
         help_row("Tab", "Switch pane"),
-        help_row("gg / G", "Jump to first / last"),
+        help_row("Home / End", "Jump to first / last"),
         help_row("Ctrl+D / Ctrl+U", "Half-page down / up"),
         Line::from(""),
         section("Todos"),
-        help_row("n", "Add new todo"),
+        help_row("Space", "New todo"),
         help_row("Enter", "Edit todo title"),
-        help_row("Space", "Toggle done"),
-        help_row("t", "Edit tags"),
-        help_row("x", "Toggle select"),
+        help_row("Alt+K", "Toggle done"),
+        help_row("Alt+T", "Edit tags"),
+        help_row("Alt+X", "Toggle select"),
         help_row("Del / Backspace", "Delete todo(s)"),
-        help_row("m", "Move to list"),
+        help_row("Alt+M", "Move to list"),
         help_row("Esc", "Clear selection"),
-        help_row("Shift+K/J / Alt+arrows", "Move up / down"),
-        help_row("Alt+Super+arrows", "Move to top / bottom"),
-        help_row("Shift+D", "Toggle show done"),
-        help_row("f", "Filter by tag"),
-        help_row("Shift+F", "Focus mode (timer)"),
-        help_row("Shift+T", "Edit time"),
+        help_row(
+            "Shift+\u{2191}/\u{2193} / Alt+\u{2191}/\u{2193}",
+            "Reorder up / down",
+        ),
+        help_row("Alt+Super+\u{2191}/\u{2193}", "Move to top / bottom"),
+        help_row("Alt+Shift+D", "Toggle show done"),
+        help_row("Alt+Shift+F", "Filter by tag"),
+        help_row("Alt+F", "Focus mode (timer)"),
+        help_row("Alt+Shift+T", "Edit time"),
         Line::from(""),
         section("Lists"),
-        help_row("n", "Add new list (sidebar)"),
+        help_row("Alt+N", "Add new list (sidebar)"),
         help_row("Enter", "Rename list (sidebar)"),
-        help_row("d", "Toggle daily (auto-reset)"),
-        help_row("Shift+K/J / Alt+arrows", "Move up / down"),
-        help_row("Alt+Super+arrows", "Move to top / bottom"),
+        help_row("Alt+D", "Toggle daily (auto-reset)"),
+        help_row(
+            "Shift+\u{2191}/\u{2193} / Alt+\u{2191}/\u{2193}",
+            "Reorder up / down",
+        ),
+        help_row("Alt+Super+\u{2191}/\u{2193}", "Move to top / bottom"),
         help_row("Del / Backspace", "Delete list (sidebar)"),
         Line::from(""),
         section("General"),
-        help_row("/", "Search"),
-        help_row("u / Ctrl+R", "Undo / Redo"),
+        help_row("Type any character", "Search"),
+        help_row("Alt+U / Ctrl+Z", "Undo"),
+        help_row("Ctrl+Y", "Redo"),
         help_row("?", "Toggle help"),
-        help_row("q", "Quit"),
+        help_row("Alt+Q", "Quit"),
     ];
 
     let block = Block::default()
