@@ -822,6 +822,10 @@ impl App {
         }
     }
 
+    pub fn input_chars_before_cursor(&self) -> usize {
+        self.input_buffer[..self.input_cursor].chars().count()
+    }
+
     pub fn start_search(&mut self) {
         self.input_mode = InputMode::Searching;
         self.input_buffer.clear();
@@ -886,7 +890,8 @@ impl App {
             match result {
                 SearchResult::List(li) => {
                     self.selected_list_index = li;
-                    self.active_pane = Pane::Sidebar;
+                    self.selected_item_index = 0;
+                    self.active_pane = Pane::Main;
                 }
                 SearchResult::Item(li, ii) => {
                     self.selected_list_index = li;
@@ -1626,6 +1631,39 @@ mod tests {
         assert_eq!(app.input_cursor, 0);
     }
 
+    #[test]
+    fn test_input_chars_before_cursor() {
+        let mut app = sample_app();
+        app.start_input(InputMode::AddingItem, "");
+        assert_eq!(app.input_chars_before_cursor(), 0);
+
+        app.input_insert_char('a');
+        app.input_insert_char('b');
+        app.input_insert_char('c');
+        assert_eq!(app.input_chars_before_cursor(), 3);
+
+        app.input_move_cursor_left();
+        assert_eq!(app.input_chars_before_cursor(), 2);
+
+        app.input_move_cursor_left();
+        app.input_move_cursor_left();
+        assert_eq!(app.input_chars_before_cursor(), 0);
+    }
+
+    #[test]
+    fn test_input_chars_before_cursor_multibyte() {
+        let mut app = sample_app();
+        app.start_input(InputMode::AddingItem, "");
+        for c in "café".chars() {
+            app.input_insert_char(c);
+        }
+        assert_eq!(app.input_chars_before_cursor(), 4);
+        assert_eq!(app.input_cursor, "café".len());
+
+        app.input_move_cursor_left();
+        assert_eq!(app.input_chars_before_cursor(), 3);
+    }
+
     fn search_app() -> App {
         let mut work = TodoList::new("Work");
         work.items.push(TodoItem {
@@ -1738,7 +1776,8 @@ mod tests {
         app.select_search_result();
 
         assert_eq!(app.selected_list_index, 1);
-        assert_eq!(app.active_pane, Pane::Sidebar);
+        assert_eq!(app.selected_item_index, 0);
+        assert_eq!(app.active_pane, Pane::Main);
         assert_eq!(app.input_mode, InputMode::Normal);
         assert!(app.search_results.is_empty());
     }

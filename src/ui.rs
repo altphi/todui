@@ -220,29 +220,55 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                     base_style
                 };
 
-                spans.push(Span::styled(
-                    format!("  {} {}", checkbox, item.title),
-                    bg_style,
-                ));
+                let prefix = format!("  {} ", checkbox);
+                let prefix_width = prefix.chars().count();
 
-                if item.time_secs > 0 {
-                    let time_str = crate::storage::format_time(item.time_secs);
-                    let time_style = Style::default().fg(Color::DarkGray);
-                    let time_style = if is_cursor {
-                        time_style.bg(Color::DarkGray).fg(Color::Gray)
-                    } else {
-                        time_style
-                    };
-                    spans.push(Span::styled(format!("  {}", time_str), time_style));
-                }
+                let time_text = if item.time_secs > 0 {
+                    format!("  {}", crate::storage::format_time(item.time_secs))
+                } else {
+                    String::new()
+                };
 
-                if !item.tags.is_empty() {
+                let tags_text = if !item.tags.is_empty() {
                     let tags_str = item
                         .tags
                         .iter()
                         .map(|t| format!("@{}", t))
                         .collect::<Vec<_>>()
                         .join(" ");
+                    format!("  {}", tags_str)
+                } else {
+                    String::new()
+                };
+
+                let suffix_width = time_text.chars().count() + tags_text.chars().count();
+                let available = (inner.width as usize).saturating_sub(prefix_width + suffix_width);
+                let title_chars = item.title.chars().count();
+
+                let title_display = if title_chars > available && available > 1 {
+                    let truncated: String =
+                        item.title.chars().take(available - 1).collect();
+                    format!("{}\u{2026}", truncated)
+                } else {
+                    item.title.clone()
+                };
+
+                spans.push(Span::styled(
+                    format!("{}{}", prefix, title_display),
+                    bg_style,
+                ));
+
+                if item.time_secs > 0 {
+                    let time_style = Style::default().fg(Color::DarkGray);
+                    let time_style = if is_cursor {
+                        time_style.bg(Color::DarkGray).fg(Color::Gray)
+                    } else {
+                        time_style
+                    };
+                    spans.push(Span::styled(time_text, time_style));
+                }
+
+                if !item.tags.is_empty() {
                     let tag_style = if is_multi_selected {
                         Style::default().fg(Color::Yellow)
                     } else if item.done {
@@ -255,7 +281,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                     } else {
                         tag_style
                     };
-                    spans.push(Span::styled(format!("  {}", tags_str), tag_style));
+                    spans.push(Span::styled(tags_text, tag_style));
                 }
 
                 ListItem::new(Line::from(spans))
@@ -320,6 +346,14 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(bar, area);
 }
 
+fn input_modal_height(app: &App, modal_width: u16) -> u16 {
+    let inner_width = (modal_width.saturating_sub(2)).max(1) as usize;
+    let total_chars = app.input_buffer.chars().count().max(1);
+    let visual_lines = total_chars.div_ceil(inner_width);
+    let max_height: u16 = 10;
+    (visual_lines as u16 + 2).min(max_height)
+}
+
 fn render_input_modal(app: &App, frame: &mut Frame) {
     let title = match app.input_mode {
         InputMode::AddingItem => " New Todo ",
@@ -331,7 +365,9 @@ fn render_input_modal(app: &App, frame: &mut Frame) {
         _ => "",
     };
 
-    let area = centered_rect(50, 3, frame.area());
+    let modal_width: u16 = 50;
+    let modal_height = input_modal_height(app, modal_width);
+    let area = centered_rect(modal_width, modal_height, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -340,14 +376,43 @@ fn render_input_modal(app: &App, frame: &mut Frame) {
         .border_style(Style::default().fg(Color::Cyan));
 
     let inner = block.inner(area);
+    let inner_width = inner.width.max(1) as usize;
 
-    let input = Paragraph::new(app.input_buffer.as_str())
+    let wrapped_text: String = app
+        .input_buffer
+        .chars()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            if i > 0 && i % inner_width == 0 {
+                Some('\n')
+            } else {
+                None
+            }
+            .into_iter()
+            .chain(std::iter::once(c))
+        })
+        .collect();
+
+    let chars_before_cursor = app.input_chars_before_cursor();
+    let cursor_line = chars_before_cursor / inner_width;
+    let cursor_col = chars_before_cursor % inner_width;
+
+    let max_visible_lines = inner.height as usize;
+    let scroll_offset = if cursor_line >= max_visible_lines {
+        cursor_line - max_visible_lines + 1
+    } else {
+        0
+    };
+
+    let input = Paragraph::new(wrapped_text)
         .style(Style::default().fg(Color::Yellow))
-        .block(block);
+        .block(block)
+        .scroll((scroll_offset as u16, 0));
+
     frame.render_widget(input, area);
 
-    let cursor_x = inner.x + app.input_cursor as u16;
-    let cursor_y = inner.y;
+    let cursor_x = inner.x + cursor_col as u16;
+    let cursor_y = inner.y + (cursor_line - scroll_offset) as u16;
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
@@ -740,7 +805,9 @@ fn render_autocomplete_dropdown(app: &App, frame: &mut Frame) {
     }
 
     // Position dropdown below the input modal
-    let modal_area = centered_rect(50, 3, frame.area());
+    let modal_width: u16 = 50;
+    let modal_height = input_modal_height(app, modal_width);
+    let modal_area = centered_rect(modal_width, modal_height, frame.area());
     let suggestion_count = app.autocomplete_suggestions.len().min(5) as u16;
     let dropdown_y = modal_area.y + modal_area.height;
     let dropdown_width = modal_area.width.min(30);
