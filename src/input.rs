@@ -93,44 +93,49 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
+    let tag_view = app.is_tag_view();
     match (key.modifiers, key.code) {
         (_, KeyCode::Char(' ')) => {
             app.toggle_done_selected();
         }
         (KeyModifiers::NONE, KeyCode::Char('n')) => {
-            app.start_input(InputMode::AddingItem, "");
+            if !tag_view {
+                app.start_input(InputMode::AddingItem, "");
+            }
         }
         (_, KeyCode::Enter) => {
-            if let Some(list) = app.current_list() {
-                let visible = app.visible_items();
-                if let Some(&(real_idx, _)) = visible.get(app.selected_item_index) {
-                    let title = list.items[real_idx].title.clone();
-                    app.start_input(InputMode::EditingItem, &title);
-                }
+            if let Some((li, ii)) = app.resolve_selected_item() {
+                let title = app.lists[li].items[ii].title.clone();
+                app.start_input(InputMode::EditingItem, &title);
             }
         }
         (KeyModifiers::NONE, KeyCode::Char('t')) => {
-            if let Some(list) = app.current_list() {
-                let visible = app.visible_items();
-                if let Some(&(real_idx, _)) = visible.get(app.selected_item_index) {
-                    let tags_str = list.items[real_idx]
-                        .tags
-                        .iter()
-                        .map(|t| format!("@{}", t))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    app.start_input(InputMode::EditingTags, &tags_str);
-                }
+            if let Some((li, ii)) = app.resolve_selected_item() {
+                let tags_str = app.lists[li].items[ii]
+                    .tags
+                    .iter()
+                    .map(|t| format!("@{}", t))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                app.start_input(InputMode::EditingTags, &tags_str);
             }
         }
         (KeyModifiers::NONE, KeyCode::Char('x')) => {
-            app.toggle_select_current();
+            if !tag_view {
+                app.toggle_select_current();
+            }
         }
         (_, KeyCode::Delete | KeyCode::Backspace) => {
-            app.delete_selected();
+            if tag_view {
+                app.delete_todo();
+            } else {
+                app.delete_selected();
+            }
         }
         (KeyModifiers::NONE, KeyCode::Char('m')) => {
-            app.start_move_to_list();
+            if !tag_view {
+                app.start_move_to_list();
+            }
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
             app.clear_selection();
@@ -138,18 +143,26 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
         (KeyModifiers::SHIFT, KeyCode::Up)
         | (KeyModifiers::SHIFT, KeyCode::Char('K'))
         | (KeyModifiers::ALT, KeyCode::Up) => {
-            app.move_todo_up();
+            if !tag_view {
+                app.move_todo_up();
+            }
         }
         (KeyModifiers::SHIFT, KeyCode::Down)
         | (KeyModifiers::SHIFT, KeyCode::Char('J'))
         | (KeyModifiers::ALT, KeyCode::Down) => {
-            app.move_todo_down();
+            if !tag_view {
+                app.move_todo_down();
+            }
         }
         (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            app.move_todo_to_top();
+            if !tag_view {
+                app.move_todo_to_top();
+            }
         }
         (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            app.move_todo_to_bottom();
+            if !tag_view {
+                app.move_todo_to_bottom();
+            }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('D')) => {
             app.toggle_show_done();
@@ -158,20 +171,19 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
             app.start_focus();
         }
         (KeyModifiers::NONE, KeyCode::Char('f')) => {
-            app.start_filter();
+            if !tag_view {
+                app.start_filter();
+            }
         }
         (KeyModifiers::SHIFT, KeyCode::Char('T')) => {
-            if let Some(list) = app.current_list() {
-                let visible = app.visible_items();
-                if let Some(&(real_idx, _)) = visible.get(app.selected_item_index) {
-                    let time_str = crate::storage::format_time(list.items[real_idx].time_secs);
-                    let prefill = if time_str.is_empty() {
-                        "0m".to_string()
-                    } else {
-                        time_str
-                    };
-                    app.start_input(InputMode::EditingTime, &prefill);
-                }
+            if let Some((li, ii)) = app.resolve_selected_item() {
+                let time_str = crate::storage::format_time(app.lists[li].items[ii].time_secs);
+                let prefill = if time_str.is_empty() {
+                    "0m".to_string()
+                } else {
+                    time_str
+                };
+                app.start_input(InputMode::EditingTime, &prefill);
             }
         }
         _ => {}
@@ -179,6 +191,9 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_sidebar(app: &mut App, key: KeyEvent) {
+    if app.is_tag_view() {
+        return;
+    }
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Char('d')) => {
             app.toggle_list_type();
@@ -950,9 +965,11 @@ mod tests {
             TodoList::new("Gamma"),
         ]);
         app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 2;
         app.selected_list_index = 2;
         handle_key(&mut app, key(KeyCode::Char('g')));
         handle_key(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -1109,5 +1126,102 @@ mod tests {
         assert_eq!(app.lists[0].list_type, crate::model::ListType::Daily);
         handle_key(&mut app, key(KeyCode::Char('d')));
         assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
+    }
+
+    #[test]
+    fn test_sidebar_no_rename_on_tag() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_sidebar_no_delete_on_tag() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Delete));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_main_no_add_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Char('n')));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_main_toggle_done_works_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Char(' ')));
+        assert!(app.lists[0].items[0].done);
+    }
+
+    #[test]
+    fn test_main_edit_works_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::EditingItem);
+        assert_eq!(app.input_buffer, "A");
+    }
+
+    #[test]
+    fn test_main_delete_works_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 1;
+        handle_key(&mut app, key(KeyCode::Delete));
+        assert_eq!(app.lists[0].items.len(), 0);
     }
 }

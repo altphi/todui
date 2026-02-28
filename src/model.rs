@@ -47,6 +47,13 @@ pub enum InputMode {
 pub enum SearchResult {
     List(usize),
     Item(usize, usize),
+    Tag(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SidebarEntry {
+    List(usize),
+    Tag(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +61,7 @@ pub struct AppSnapshot {
     pub lists: Vec<TodoList>,
     pub selected_list_index: usize,
     pub selected_item_index: usize,
+    pub selected_sidebar_index: usize,
 }
 
 impl TodoItem {

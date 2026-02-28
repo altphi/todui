@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::model::{InputMode, ListType, Pane, SearchResult};
+use crate::model::{InputMode, ListType, Pane, SearchResult, SidebarEntry};
 
 pub fn render(app: &App, frame: &mut Frame) {
     let outer = Layout::default()
@@ -30,8 +30,16 @@ pub fn render(app: &App, frame: &mut Frame) {
         })
         .max()
         .unwrap_or(4);
-    // 2 border + 2 inner padding + 2 text padding + 2 balance + name length, minimum 14
-    let sidebar_width = (longest_list_name + 8).max(14);
+    let longest_tag_name = app
+        .sidebar_entries
+        .iter()
+        .filter_map(|e| match e {
+            SidebarEntry::Tag(name) => Some(name.len() as u16 + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let sidebar_width = (longest_list_name.max(longest_tag_name) + 8).max(14);
 
     let main_area = Layout::default()
         .direction(Direction::Horizontal)
@@ -93,37 +101,82 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let has_tags = app
+        .sidebar_entries
+        .iter()
+        .any(|e| matches!(e, SidebarEntry::Tag(_)));
+    let num_lists = app.lists.len();
+    let divider_offset: usize = if has_tags { 1 } else { 0 };
+    let total_rows = app.sidebar_entries.len() + divider_offset;
+
+    let selected_visual_row = if has_tags && app.selected_sidebar_index >= num_lists {
+        app.selected_sidebar_index + 1
+    } else {
+        app.selected_sidebar_index
+    };
+
     let visible_height = inner.height as usize;
-    let offset = if app.selected_list_index >= visible_height {
-        app.selected_list_index - visible_height + 1
+    let offset = if selected_visual_row >= visible_height {
+        selected_visual_row - visible_height + 1
     } else {
         0
     };
 
-    let items: Vec<ListItem> = app
-        .lists
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible_height)
-        .map(|(i, list)| {
-            let indicator = if list.list_type == ListType::Daily {
-                if app.ascii_mode { " (d)" } else { " \u{21bb}" }
-            } else {
-                ""
-            };
-            let content = format!("  {}{}", list.name, indicator);
-            let style = if i == app.selected_list_index {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(Span::styled(content, style)))
-        })
-        .collect();
+    let mut items: Vec<ListItem> = Vec::new();
+    for visual_row in offset..(offset + visible_height).min(total_rows) {
+        if has_tags && visual_row == num_lists {
+            let sep = "\u{2500}".repeat(inner.width as usize);
+            items.push(ListItem::new(Line::from(Span::styled(
+                sep,
+                Style::default().fg(Color::DarkGray),
+            ))));
+            continue;
+        }
+
+        let entry_index = if has_tags && visual_row > num_lists {
+            visual_row - 1
+        } else {
+            visual_row
+        };
+
+        if entry_index >= app.sidebar_entries.len() {
+            break;
+        }
+
+        let is_selected = entry_index == app.selected_sidebar_index;
+        match &app.sidebar_entries[entry_index] {
+            SidebarEntry::List(i) => {
+                let list = &app.lists[*i];
+                let indicator = if list.list_type == ListType::Daily {
+                    if app.ascii_mode { " (d)" } else { " \u{21bb}" }
+                } else {
+                    ""
+                };
+                let content = format!("  {}{}", list.name, indicator);
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                items.push(ListItem::new(Line::from(Span::styled(content, style))));
+            }
+            SidebarEntry::Tag(name) => {
+                let content = format!("  @{}", name);
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::Blue)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Blue)
+                };
+                items.push(ListItem::new(Line::from(Span::styled(content, style))));
+            }
+        }
+    }
 
     let list_widget = List::new(items);
     frame.render_widget(list_widget, inner);
@@ -137,10 +190,13 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
         Color::DarkGray
     };
 
-    let title = app
-        .current_list()
-        .map(|l| format!(" {} ", l.name))
-        .unwrap_or_else(|| " Todos ".to_string());
+    let title = if let Some(tag) = app.selected_tag_name() {
+        format!(" @{} ", tag)
+    } else {
+        app.current_list()
+            .map(|l| format!(" {} ", l.name))
+            .unwrap_or_else(|| " Todos ".to_string())
+    };
 
     let block = Block::default()
         .title(title)
@@ -151,6 +207,136 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    if app.is_tag_view() {
+        let tag_items = app.tag_visible_items();
+        if tag_items.is_empty() {
+            let hint = Paragraph::new("No items with this tag.")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(hint, inner);
+        } else {
+            let visible_height = inner.height as usize;
+            let offset = if app.selected_item_index >= visible_height {
+                app.selected_item_index - visible_height + 1
+            } else {
+                0
+            };
+
+            let items: Vec<ListItem> = tag_items
+                .iter()
+                .enumerate()
+                .skip(offset)
+                .take(visible_height)
+                .map(|(vi, &(li, ii))| {
+                    let item = &app.lists[li].items[ii];
+                    let list_name = &app.lists[li].name;
+                    let is_cursor = is_active && vi == app.selected_item_index;
+
+                    let checkbox = if app.ascii_mode {
+                        if item.done { "[x]" } else { "[ ]" }
+                    } else if item.done {
+                        "\u{2714}"
+                    } else {
+                        "\u{2751}"
+                    };
+
+                    let base_style = if item.done {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    };
+
+                    let bg_style = if is_cursor {
+                        if item.done {
+                            base_style.fg(Color::Gray).bg(Color::DarkGray)
+                        } else {
+                            base_style.bg(Color::DarkGray)
+                        }
+                    } else {
+                        base_style
+                    };
+
+                    let prefix = format!("  {} ", checkbox);
+                    let prefix_width = prefix.chars().count();
+
+                    let time_text = if item.time_secs > 0 {
+                        format!("  {}", crate::storage::format_time(item.time_secs))
+                    } else {
+                        String::new()
+                    };
+
+                    let tags_text = if !item.tags.is_empty() {
+                        let tags_str = item
+                            .tags
+                            .iter()
+                            .map(|t| format!("@{}", t))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!("  {}", tags_str)
+                    } else {
+                        String::new()
+                    };
+
+                    let list_suffix = format!("  \u{2014} {}", list_name);
+                    let suffix_width = time_text.chars().count()
+                        + tags_text.chars().count()
+                        + list_suffix.chars().count();
+                    let available =
+                        (inner.width as usize).saturating_sub(prefix_width + suffix_width);
+                    let title_chars = item.title.chars().count();
+
+                    let title_display = if title_chars > available && available > 1 {
+                        let truncated: String = item.title.chars().take(available - 1).collect();
+                        format!("{}\u{2026}", truncated)
+                    } else {
+                        item.title.clone()
+                    };
+
+                    let mut spans = vec![];
+                    spans.push(Span::styled(
+                        format!("{}{}", prefix, title_display),
+                        bg_style,
+                    ));
+
+                    if item.time_secs > 0 {
+                        let time_style = if is_cursor {
+                            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        spans.push(Span::styled(time_text, time_style));
+                    }
+
+                    if !item.tags.is_empty() {
+                        let tag_style = if item.done {
+                            Style::default().fg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::Blue)
+                        };
+                        let tag_style = if is_cursor {
+                            tag_style.bg(Color::DarkGray)
+                        } else {
+                            tag_style
+                        };
+                        spans.push(Span::styled(tags_text, tag_style));
+                    }
+
+                    let list_style = if is_cursor {
+                        Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    spans.push(Span::styled(list_suffix, list_style));
+
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+
+            let list_widget = List::new(items);
+            frame.render_widget(list_widget, inner);
+        }
+        return;
+    }
 
     let visible = app.visible_items();
 
@@ -246,8 +432,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                 let title_chars = item.title.chars().count();
 
                 let title_display = if title_chars > available && available > 1 {
-                    let truncated: String =
-                        item.title.chars().take(available - 1).collect();
+                    let truncated: String = item.title.chars().take(available - 1).collect();
                     format!("{}\u{2026}", truncated)
                 } else {
                     item.title.clone()
@@ -326,16 +511,27 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             } else {
                 match app.active_pane {
                     Pane::Sidebar => {
-                        format!(
-                            "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  d: daily  Del: delete  Tab: todos  ?: help{}",
-                            filter_indicator
-                        )
+                        if app.is_tag_view() {
+                            format!("  j/k: navigate  Tab: todos  ?: help{}", filter_indicator)
+                        } else {
+                            format!(
+                                "  j/k: navigate  Shift+K/J: reorder  n: new  Enter: rename  d: daily  Del: delete  Tab: todos  ?: help{}",
+                                filter_indicator
+                            )
+                        }
                     }
                     Pane::Main => {
-                        format!(
-                            "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: select  Del: delete  m: move  ?: help{}",
-                            filter_indicator
-                        )
+                        if app.is_tag_view() {
+                            format!(
+                                "  j/k: navigate  Space: toggle  Enter: edit  Del: delete  ?: help{}",
+                                filter_indicator
+                            )
+                        } else {
+                            format!(
+                                "  j/k: navigate  Space: toggle  n: new  Enter: edit  x: select  Del: delete  m: move  ?: help{}",
+                                filter_indicator
+                            )
+                        }
                     }
                 }
             }
@@ -543,6 +739,14 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                             Style::default()
                         };
                         ListItem::new(Line::from(Span::styled(text, style)))
+                    }
+                    SearchResult::Tag(name) => {
+                        let style = if is_selected {
+                            Style::default().fg(Color::Blue).bg(Color::DarkGray)
+                        } else {
+                            Style::default().fg(Color::Blue)
+                        };
+                        ListItem::new(Line::from(Span::styled(format!("  @ {}", name), style)))
                     }
                 }
             })

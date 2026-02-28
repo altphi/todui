@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::model::{AppSnapshot, InputMode, ListType, Pane, SearchResult, TodoItem, TodoList};
+use crate::model::{
+    AppSnapshot, InputMode, ListType, Pane, SearchResult, SidebarEntry, TodoItem, TodoList,
+};
 use crate::storage;
 
 pub struct App {
@@ -36,12 +38,14 @@ pub struct App {
     pub selected_items: HashSet<usize>,
     pub move_to_list_cursor: usize,
     pub move_to_list_filter: String,
+    pub sidebar_entries: Vec<SidebarEntry>,
+    pub selected_sidebar_index: usize,
 }
 
 impl App {
     pub fn new(data_dir: PathBuf, ascii_mode: bool) -> std::io::Result<Self> {
         let lists = storage::load_lists(&data_dir)?;
-        Ok(Self {
+        let mut app = Self {
             lists,
             active_pane: Pane::Sidebar,
             selected_list_index: 0,
@@ -72,12 +76,16 @@ impl App {
             selected_items: HashSet::new(),
             move_to_list_cursor: 0,
             move_to_list_filter: String::new(),
-        })
+            sidebar_entries: Vec::new(),
+            selected_sidebar_index: 0,
+        };
+        app.rebuild_sidebar_entries();
+        Ok(app)
     }
 
     #[cfg(test)]
     pub fn with_lists(lists: Vec<TodoList>) -> Self {
-        Self {
+        let mut app = Self {
             lists,
             active_pane: Pane::Sidebar,
             selected_list_index: 0,
@@ -108,7 +116,11 @@ impl App {
             selected_items: HashSet::new(),
             move_to_list_cursor: 0,
             move_to_list_filter: String::new(),
-        }
+            sidebar_entries: Vec::new(),
+            selected_sidebar_index: 0,
+        };
+        app.rebuild_sidebar_entries();
+        app
     }
 
     fn snapshot(&self) -> AppSnapshot {
@@ -116,6 +128,7 @@ impl App {
             lists: self.lists.clone(),
             selected_list_index: self.selected_list_index,
             selected_item_index: self.selected_item_index,
+            selected_sidebar_index: self.selected_sidebar_index,
         }
     }
 
@@ -128,6 +141,8 @@ impl App {
         self.lists = snap.lists;
         self.selected_list_index = snap.selected_list_index;
         self.selected_item_index = snap.selected_item_index;
+        self.selected_sidebar_index = snap.selected_sidebar_index;
+        self.rebuild_sidebar_entries();
     }
 
     pub fn undo(&mut self) {
@@ -175,14 +190,24 @@ impl App {
             .unwrap_or_default()
     }
 
+    fn sync_sidebar_selection(&mut self) {
+        match self.sidebar_entries.get(self.selected_sidebar_index) {
+            Some(SidebarEntry::List(i)) => {
+                self.selected_list_index = *i;
+            }
+            Some(SidebarEntry::Tag(_)) | None => {}
+        }
+        self.selected_item_index = 0;
+        self.filter_tags.clear();
+        self.selected_items.clear();
+    }
+
     pub fn jump_to_first(&mut self) {
         match self.active_pane {
             Pane::Sidebar => {
-                if self.selected_list_index != 0 {
-                    self.selected_list_index = 0;
-                    self.selected_item_index = 0;
-                    self.filter_tags.clear();
-                    self.selected_items.clear();
+                if self.selected_sidebar_index != 0 {
+                    self.selected_sidebar_index = 0;
+                    self.sync_sidebar_selection();
                 }
             }
             Pane::Main => {
@@ -194,21 +219,23 @@ impl App {
     pub fn page_down(&mut self, page_size: usize) {
         match self.active_pane {
             Pane::Sidebar => {
-                if !self.lists.is_empty() {
-                    let last = self.lists.len() - 1;
-                    let target = (self.selected_list_index + page_size).min(last);
-                    if target != self.selected_list_index {
-                        self.selected_list_index = target;
-                        self.selected_item_index = 0;
-                        self.filter_tags.clear();
-                        self.selected_items.clear();
+                if !self.sidebar_entries.is_empty() {
+                    let last = self.sidebar_entries.len() - 1;
+                    let target = (self.selected_sidebar_index + page_size).min(last);
+                    if target != self.selected_sidebar_index {
+                        self.selected_sidebar_index = target;
+                        self.sync_sidebar_selection();
                     }
                 }
             }
             Pane::Main => {
-                let visible = self.visible_items();
-                if !visible.is_empty() {
-                    let last = visible.len() - 1;
+                let count = if self.is_tag_view() {
+                    self.tag_visible_items().len()
+                } else {
+                    self.visible_items().len()
+                };
+                if count > 0 {
+                    let last = count - 1;
                     self.selected_item_index = (self.selected_item_index + page_size).min(last);
                 }
             }
@@ -218,12 +245,10 @@ impl App {
     pub fn page_up(&mut self, page_size: usize) {
         match self.active_pane {
             Pane::Sidebar => {
-                let target = self.selected_list_index.saturating_sub(page_size);
-                if target != self.selected_list_index {
-                    self.selected_list_index = target;
-                    self.selected_item_index = 0;
-                    self.filter_tags.clear();
-                    self.selected_items.clear();
+                let target = self.selected_sidebar_index.saturating_sub(page_size);
+                if target != self.selected_sidebar_index {
+                    self.selected_sidebar_index = target;
+                    self.sync_sidebar_selection();
                 }
             }
             Pane::Main => {
@@ -235,20 +260,22 @@ impl App {
     pub fn jump_to_last(&mut self) {
         match self.active_pane {
             Pane::Sidebar => {
-                if !self.lists.is_empty() {
-                    let last = self.lists.len() - 1;
-                    if self.selected_list_index != last {
-                        self.selected_list_index = last;
-                        self.selected_item_index = 0;
-                        self.filter_tags.clear();
-                        self.selected_items.clear();
+                if !self.sidebar_entries.is_empty() {
+                    let last = self.sidebar_entries.len() - 1;
+                    if self.selected_sidebar_index != last {
+                        self.selected_sidebar_index = last;
+                        self.sync_sidebar_selection();
                     }
                 }
             }
             Pane::Main => {
-                let visible = self.visible_items();
-                if !visible.is_empty() {
-                    self.selected_item_index = visible.len() - 1;
+                let count = if self.is_tag_view() {
+                    self.tag_visible_items().len()
+                } else {
+                    self.visible_items().len()
+                };
+                if count > 0 {
+                    self.selected_item_index = count - 1;
                 }
             }
         }
@@ -265,19 +292,14 @@ impl App {
     pub fn move_selection_up(&mut self) {
         match self.active_pane {
             Pane::Sidebar => {
-                if self.selected_list_index > 0 {
-                    self.selected_list_index -= 1;
-                    self.selected_item_index = 0;
-                    self.filter_tags.clear();
-                    self.selected_items.clear();
+                if self.selected_sidebar_index > 0 {
+                    self.selected_sidebar_index -= 1;
+                    self.sync_sidebar_selection();
                 }
             }
             Pane::Main => {
                 if self.selected_item_index > 0 {
-                    let visible = self.visible_items();
-                    if !visible.is_empty() && self.selected_item_index > 0 {
-                        self.selected_item_index -= 1;
-                    }
+                    self.selected_item_index -= 1;
                 }
             }
         }
@@ -286,16 +308,18 @@ impl App {
     pub fn move_selection_down(&mut self) {
         match self.active_pane {
             Pane::Sidebar => {
-                if self.selected_list_index + 1 < self.lists.len() {
-                    self.selected_list_index += 1;
-                    self.selected_item_index = 0;
-                    self.filter_tags.clear();
-                    self.selected_items.clear();
+                if self.selected_sidebar_index + 1 < self.sidebar_entries.len() {
+                    self.selected_sidebar_index += 1;
+                    self.sync_sidebar_selection();
                 }
             }
             Pane::Main => {
-                let visible = self.visible_items();
-                if !visible.is_empty() && self.selected_item_index + 1 < visible.len() {
+                let count = if self.is_tag_view() {
+                    self.tag_visible_items().len()
+                } else {
+                    self.visible_items().len()
+                };
+                if count > 0 && self.selected_item_index + 1 < count {
                     self.selected_item_index += 1;
                 }
             }
@@ -303,19 +327,40 @@ impl App {
     }
 
     pub fn clamp_selection(&mut self) {
-        if self.lists.is_empty() {
+        if self.sidebar_entries.is_empty() {
+            self.selected_sidebar_index = 0;
             self.selected_list_index = 0;
             self.selected_item_index = 0;
             return;
         }
-        if self.selected_list_index >= self.lists.len() {
-            self.selected_list_index = self.lists.len() - 1;
+        if self.selected_sidebar_index >= self.sidebar_entries.len() {
+            self.selected_sidebar_index = self.sidebar_entries.len() - 1;
         }
-        let visible = self.visible_items();
-        if visible.is_empty() {
-            self.selected_item_index = 0;
-        } else if self.selected_item_index >= visible.len() {
-            self.selected_item_index = visible.len() - 1;
+        if let Some(SidebarEntry::List(i)) = self.sidebar_entries.get(self.selected_sidebar_index) {
+            self.selected_list_index = *i;
+        }
+        if self.is_tag_view() {
+            let tag_items = self.tag_visible_items();
+            if tag_items.is_empty() {
+                self.selected_item_index = 0;
+            } else if self.selected_item_index >= tag_items.len() {
+                self.selected_item_index = tag_items.len() - 1;
+            }
+        } else {
+            if self.lists.is_empty() {
+                self.selected_list_index = 0;
+                self.selected_item_index = 0;
+                return;
+            }
+            if self.selected_list_index >= self.lists.len() {
+                self.selected_list_index = self.lists.len() - 1;
+            }
+            let visible = self.visible_items();
+            if visible.is_empty() {
+                self.selected_item_index = 0;
+            } else if self.selected_item_index >= visible.len() {
+                self.selected_item_index = visible.len() - 1;
+            }
         }
     }
 
@@ -327,27 +372,27 @@ impl App {
     }
 
     pub fn toggle_done(&mut self) {
-        if let Some(real_idx) = self.selected_real_index() {
+        if let Some((li, ii)) = self.resolve_selected_item() {
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items[real_idx].done = !list.items[real_idx].done;
-            }
-            self.save_current_list();
+            self.lists[li].items[ii].done = !self.lists[li].items[ii].done;
+            self.save_list_at(li);
         }
     }
 
     pub fn delete_todo(&mut self) {
-        if let Some(real_idx) = self.selected_real_index() {
+        if let Some((li, ii)) = self.resolve_selected_item() {
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items.remove(real_idx);
-            }
+            self.lists[li].items.remove(ii);
+            self.rebuild_sidebar_entries();
             self.clamp_selection();
-            self.save_current_list();
+            self.save_list_at(li);
         }
     }
 
     pub fn add_todo(&mut self, title: String) {
+        if self.is_tag_view() {
+            return;
+        }
         if title.trim().is_empty() {
             return;
         }
@@ -366,35 +411,36 @@ impl App {
                 None => list.items.push(item),
             }
         }
+        self.rebuild_sidebar_entries();
         self.save_current_list();
     }
 
     pub fn edit_todo_title(&mut self, new_title: String) {
-        if let Some(real_idx) = self.selected_real_index() {
+        if let Some((li, ii)) = self.resolve_selected_item() {
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items[real_idx].title = new_title;
-            }
-            self.save_current_list();
+            self.lists[li].items[ii].title = new_title;
+            self.save_list_at(li);
         }
     }
 
     pub fn edit_todo_tags(&mut self, tags_str: String) {
-        if let Some(real_idx) = self.selected_real_index() {
+        if let Some((li, ii)) = self.resolve_selected_item() {
             self.push_undo();
             let tags: Vec<String> = tags_str
                 .split_whitespace()
                 .map(|t| t.strip_prefix('@').unwrap_or(t).to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            if let Some(list) = self.current_list_mut() {
-                list.items[real_idx].tags = tags;
-            }
-            self.save_current_list();
+            self.lists[li].items[ii].tags = tags;
+            self.rebuild_sidebar_entries();
+            self.save_list_at(li);
         }
     }
 
     pub fn move_todo_up(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         let visible = self.visible_items();
         let vi = self.selected_item_index;
         if vi > 0 {
@@ -410,6 +456,9 @@ impl App {
     }
 
     pub fn move_todo_down(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         let visible = self.visible_items();
         let vi = self.selected_item_index;
         if vi + 1 < visible.len() {
@@ -425,6 +474,9 @@ impl App {
     }
 
     pub fn move_todo_to_top(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         if let Some(real_idx) = self.selected_real_index()
             && real_idx > 0
         {
@@ -442,6 +494,9 @@ impl App {
     }
 
     pub fn move_todo_to_bottom(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         if let Some(real_idx) = self.selected_real_index() {
             let len = self.current_list().map_or(0, |l| l.items.len());
             if real_idx + 1 < len {
@@ -467,10 +522,9 @@ impl App {
     }
 
     pub fn start_focus(&mut self) {
-        let visible = self.visible_items();
-        if let Some(&(real_idx, _)) = visible.get(self.selected_item_index) {
-            self.focus_list = self.selected_list_index;
-            self.focus_item = real_idx;
+        if let Some((li, ii)) = self.resolve_selected_item() {
+            self.focus_list = li;
+            self.focus_item = ii;
             self.focus_accumulated = 0;
             self.focus_start = Some(Instant::now());
             self.input_mode = InputMode::Focused;
@@ -501,16 +555,17 @@ impl App {
     }
 
     pub fn set_item_time(&mut self, secs: u64) {
-        if let Some(real_idx) = self.selected_real_index() {
+        if let Some((li, ii)) = self.resolve_selected_item() {
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items[real_idx].time_secs = secs;
-            }
-            self.save_current_list();
+            self.lists[li].items[ii].time_secs = secs;
+            self.save_list_at(li);
         }
     }
 
     pub fn start_filter(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         let mut tags: Vec<String> = Vec::new();
         if let Some(list) = self.current_list() {
             for item in &list.items {
@@ -591,6 +646,73 @@ impl App {
         }
         tags.sort();
         tags
+    }
+
+    pub fn rebuild_sidebar_entries(&mut self) {
+        self.sidebar_entries.clear();
+        for i in 0..self.lists.len() {
+            self.sidebar_entries.push(SidebarEntry::List(i));
+        }
+        let tags = self.collect_all_tags();
+        for tag in tags {
+            self.sidebar_entries.push(SidebarEntry::Tag(tag));
+        }
+        if self.selected_sidebar_index >= self.sidebar_entries.len()
+            && !self.sidebar_entries.is_empty()
+        {
+            self.selected_sidebar_index = self.sidebar_entries.len() - 1;
+        }
+    }
+
+    pub fn selected_sidebar_entry(&self) -> Option<&SidebarEntry> {
+        self.sidebar_entries.get(self.selected_sidebar_index)
+    }
+
+    pub fn is_tag_view(&self) -> bool {
+        matches!(self.selected_sidebar_entry(), Some(SidebarEntry::Tag(_)))
+    }
+
+    pub fn selected_tag_name(&self) -> Option<&str> {
+        match self.selected_sidebar_entry() {
+            Some(SidebarEntry::Tag(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn tag_visible_items(&self) -> Vec<(usize, usize)> {
+        let tag = match self.selected_tag_name() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let mut undone: Vec<(usize, usize)> = Vec::new();
+        let mut done: Vec<(usize, usize)> = Vec::new();
+        for (li, list) in self.lists.iter().enumerate() {
+            for (ii, item) in list.items.iter().enumerate() {
+                if !item.tags.iter().any(|t| t == tag) {
+                    continue;
+                }
+                if item.done {
+                    if self.show_done {
+                        done.push((li, ii));
+                    }
+                } else {
+                    undone.push((li, ii));
+                }
+            }
+        }
+        undone.extend(done);
+        undone
+    }
+
+    pub fn resolve_selected_item(&self) -> Option<(usize, usize)> {
+        if self.is_tag_view() {
+            self.tag_visible_items()
+                .get(self.selected_item_index)
+                .copied()
+        } else {
+            self.selected_real_index()
+                .map(|ri| (self.selected_list_index, ri))
+        }
     }
 
     pub fn update_autocomplete(&mut self) {
@@ -675,6 +797,7 @@ impl App {
         self.push_undo();
         let list = TodoList::new(name);
         self.lists.push(list);
+        self.rebuild_sidebar_entries();
         self.selected_list_index = self.lists.len() - 1;
         self.selected_item_index = 0;
         self.save_current_list();
@@ -705,6 +828,7 @@ impl App {
         let list_name = self.lists[self.selected_list_index].name.clone();
         let _ = storage::delete_list_file(&self.data_dir, &list_name);
         self.lists.remove(self.selected_list_index);
+        self.rebuild_sidebar_entries();
         self.clamp_selection();
         self.save_order();
     }
@@ -836,7 +960,6 @@ impl App {
 
     pub fn update_search_results(&mut self) {
         self.search_results.clear();
-
         let query = self.input_buffer.to_lowercase();
         if query.is_empty() {
             self.search_selected = 0;
@@ -844,7 +967,8 @@ impl App {
         }
 
         let mut list_matches = Vec::new();
-        let mut tag_matches = Vec::new();
+        let mut tag_result_matches = Vec::new();
+        let mut tag_item_matches = Vec::new();
         let mut title_matches = Vec::new();
 
         for (li, list) in self.lists.iter().enumerate() {
@@ -855,15 +979,23 @@ impl App {
                 let title_match = item.title.to_lowercase().contains(&query);
                 let tag_match = item.tags.iter().any(|t| t.to_lowercase().contains(&query));
                 if tag_match && !title_match {
-                    tag_matches.push(SearchResult::Item(li, ii));
+                    tag_item_matches.push(SearchResult::Item(li, ii));
                 } else if title_match {
                     title_matches.push(SearchResult::Item(li, ii));
                 }
             }
         }
 
+        let all_tags = self.collect_all_tags();
+        for tag in all_tags {
+            if tag.to_lowercase().contains(&query) {
+                tag_result_matches.push(SearchResult::Tag(tag));
+            }
+        }
+
         self.search_results.extend(list_matches);
-        self.search_results.extend(tag_matches);
+        self.search_results.extend(tag_result_matches);
+        self.search_results.extend(tag_item_matches);
         self.search_results.extend(title_matches);
 
         if self.search_results.is_empty() {
@@ -890,11 +1022,13 @@ impl App {
             match result {
                 SearchResult::List(li) => {
                     self.selected_list_index = li;
+                    self.selected_sidebar_index = li;
                     self.selected_item_index = 0;
                     self.active_pane = Pane::Main;
                 }
                 SearchResult::Item(li, ii) => {
                     self.selected_list_index = li;
+                    self.selected_sidebar_index = li;
                     self.active_pane = Pane::Main;
 
                     if self.lists[li].items[ii].done {
@@ -904,6 +1038,17 @@ impl App {
                     let visible = self.visible_items();
                     if let Some(vi) = visible.iter().position(|(real_idx, _)| *real_idx == ii) {
                         self.selected_item_index = vi;
+                    }
+                }
+                SearchResult::Tag(ref name) => {
+                    if let Some(idx) = self
+                        .sidebar_entries
+                        .iter()
+                        .position(|e| matches!(e, SidebarEntry::Tag(t) if t == name))
+                    {
+                        self.selected_sidebar_index = idx;
+                        self.selected_item_index = 0;
+                        self.active_pane = Pane::Main;
                     }
                 }
             }
@@ -917,6 +1062,9 @@ impl App {
     }
 
     pub fn toggle_select_current(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         if let Some(real_idx) = self.selected_real_index()
             && !self.selected_items.remove(&real_idx)
         {
@@ -942,6 +1090,7 @@ impl App {
             }
         }
         self.selected_items.clear();
+        self.rebuild_sidebar_entries();
         self.clamp_selection();
         self.save_current_list();
     }
@@ -959,6 +1108,7 @@ impl App {
             }
         }
         self.selected_items.clear();
+        self.rebuild_sidebar_entries();
         self.clamp_selection();
         self.save_current_list();
     }
@@ -975,6 +1125,9 @@ impl App {
     }
 
     pub fn start_move_to_list(&mut self) {
+        if self.is_tag_view() {
+            return;
+        }
         if self.lists.len() < 2 {
             return;
         }
@@ -1040,6 +1193,7 @@ impl App {
         self.selected_items.clear();
         self.move_to_list_filter.clear();
         self.input_mode = InputMode::Normal;
+        self.rebuild_sidebar_entries();
         self.clamp_selection();
 
         self.save_current_list();
@@ -1063,6 +1217,12 @@ impl App {
 
     fn save_current_list(&self) {
         if let Some(list) = self.current_list() {
+            let _ = storage::save_list(&self.data_dir, list);
+        }
+    }
+
+    fn save_list_at(&self, index: usize) {
+        if let Some(list) = self.lists.get(index) {
             let _ = storage::save_list(&self.data_dir, list);
         }
     }
@@ -1129,6 +1289,7 @@ impl App {
             self.lists[i].last_reset = Some(today.clone());
             let _ = storage::save_list(&self.data_dir, &self.lists[i]);
         }
+        self.rebuild_sidebar_entries();
     }
 
     pub fn quit(&mut self) {
@@ -1182,21 +1343,32 @@ mod tests {
     fn test_navigation_sidebar() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
+        assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
 
         app.move_selection_down();
+        assert_eq!(app.selected_sidebar_index, 1);
         assert_eq!(app.selected_list_index, 1);
         assert_eq!(app.selected_item_index, 0);
 
         app.move_selection_down();
-        assert_eq!(app.selected_list_index, 1);
+        assert_eq!(app.selected_sidebar_index, 2);
+        assert!(app.is_tag_view());
+
+        app.move_selection_down();
+        assert_eq!(app.selected_sidebar_index, 2);
 
         app.move_selection_up();
-        assert_eq!(app.selected_list_index, 0);
+        assert_eq!(app.selected_sidebar_index, 1);
+        assert_eq!(app.selected_list_index, 1);
         assert_eq!(app.selected_item_index, 0);
 
         app.move_selection_up();
+        assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
+
+        app.move_selection_up();
+        assert_eq!(app.selected_sidebar_index, 0);
     }
 
     #[test]
@@ -1501,8 +1673,10 @@ mod tests {
             TodoList::new("Gamma"),
         ]);
         app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 2;
         app.selected_list_index = 2;
         app.jump_to_first();
+        assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -1705,8 +1879,9 @@ mod tests {
         app.start_search();
         app.input_buffer = "urgent".to_string();
         app.update_search_results();
-        assert_eq!(app.search_results.len(), 1);
-        assert_eq!(app.search_results[0], SearchResult::Item(0, 1));
+        assert_eq!(app.search_results.len(), 2);
+        assert_eq!(app.search_results[0], SearchResult::Tag("urgent".into()));
+        assert_eq!(app.search_results[1], SearchResult::Item(0, 1));
     }
 
     #[test]
@@ -2205,10 +2380,13 @@ mod tests {
             TodoList::new("E"),
         ]);
         app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 4;
         app.selected_list_index = 4;
         app.page_up(3);
+        assert_eq!(app.selected_sidebar_index, 1);
         assert_eq!(app.selected_list_index, 1);
         app.page_up(3);
+        assert_eq!(app.selected_sidebar_index, 0);
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -2233,6 +2411,7 @@ mod tests {
             TodoList::new("C"),
         ]);
         app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 2;
         app.selected_list_index = 2;
         app.filter_tags = vec!["tag".to_string()];
         app.page_up(1);
@@ -2647,5 +2826,357 @@ mod tests {
         app.move_todo_up();
         let visible = app.visible_items();
         assert_eq!(visible[app.selected_item_index].1.title, "D");
+    }
+
+    #[test]
+    fn test_rebuild_sidebar_entries_no_tags() {
+        let app = App::with_lists(vec![TodoList::new("Work"), TodoList::new("Personal")]);
+        assert_eq!(app.sidebar_entries.len(), 2);
+        assert_eq!(app.sidebar_entries[0], SidebarEntry::List(0));
+        assert_eq!(app.sidebar_entries[1], SidebarEntry::List(1));
+    }
+
+    #[test]
+    fn test_rebuild_sidebar_entries_with_tags() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into(), "code".into()],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let app = App::with_lists(vec![work, personal]);
+        assert_eq!(app.sidebar_entries.len(), 4);
+        assert_eq!(app.sidebar_entries[0], SidebarEntry::List(0));
+        assert_eq!(app.sidebar_entries[1], SidebarEntry::List(1));
+        assert_eq!(app.sidebar_entries[2], SidebarEntry::Tag("code".into()));
+        assert_eq!(app.sidebar_entries[3], SidebarEntry::Tag("urgent".into()));
+    }
+
+    #[test]
+    fn test_is_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        assert!(!app.is_tag_view());
+        app.selected_sidebar_index = 1;
+        assert!(app.is_tag_view());
+    }
+
+    #[test]
+    fn test_tag_visible_items() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        work.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "C".into(),
+            done: true,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, personal]);
+        app.selected_sidebar_index = 2; // Tag("urgent")
+        let items = app.tag_visible_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], (0, 0)); // Work/A (not done)
+        assert_eq!(items[1], (1, 0)); // Personal/C (done)
+    }
+
+    #[test]
+    fn test_tag_visible_items_respects_show_done() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "C".into(),
+            done: true,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, personal]);
+        app.selected_sidebar_index = 2;
+        app.show_done = false;
+        let items = app.tag_visible_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], (0, 0));
+    }
+
+    #[test]
+    fn test_resolve_selected_item_list_mode() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Main;
+        app.selected_item_index = 0;
+        let loc = app.resolve_selected_item();
+        assert_eq!(loc, Some((0, 0)));
+    }
+
+    #[test]
+    fn test_resolve_selected_item_tag_mode() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, personal]);
+        app.selected_sidebar_index = 2; // Tag("code")
+        app.selected_item_index = 1; // second item in tag view
+        let loc = app.resolve_selected_item();
+        assert_eq!(loc, Some((1, 0))); // Personal, item 0
+    }
+
+    #[test]
+    fn test_sidebar_navigation_through_tags() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, TodoList::new("Personal")]);
+        app.active_pane = Pane::Sidebar;
+        // sidebar_entries: [List(0), List(1), Tag("code")]
+        assert_eq!(app.selected_sidebar_index, 0);
+
+        app.move_selection_down();
+        assert_eq!(app.selected_sidebar_index, 1);
+        assert_eq!(app.selected_list_index, 1);
+        assert!(!app.is_tag_view());
+
+        app.move_selection_down();
+        assert_eq!(app.selected_sidebar_index, 2);
+        assert!(app.is_tag_view());
+
+        app.move_selection_down(); // at end, shouldn't move
+        assert_eq!(app.selected_sidebar_index, 2);
+
+        app.move_selection_up();
+        assert_eq!(app.selected_sidebar_index, 1);
+        assert!(!app.is_tag_view());
+        assert_eq!(app.selected_list_index, 1);
+    }
+
+    #[test]
+    fn test_sidebar_jump_to_last_includes_tags() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Sidebar;
+        app.jump_to_last();
+        assert_eq!(app.selected_sidebar_index, 1); // Tag("code")
+        assert!(app.is_tag_view());
+    }
+
+    #[test]
+    fn test_sidebar_jump_to_first_from_tag() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Sidebar;
+        app.selected_sidebar_index = 1;
+        app.jump_to_first();
+        assert_eq!(app.selected_sidebar_index, 0);
+        assert!(!app.is_tag_view());
+    }
+
+    #[test]
+    fn test_toggle_done_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, personal]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 2; // Tag("urgent")
+        app.selected_item_index = 1; // Personal/B
+        app.toggle_done();
+        assert!(app.lists[1].items[0].done);
+    }
+
+    #[test]
+    fn test_delete_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut personal = TodoList::new("Personal");
+        personal.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work, personal]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 2;
+        app.selected_item_index = 0; // Work/A
+        app.delete_todo();
+        assert_eq!(app.lists[0].items.len(), 0);
+        assert_eq!(app.lists[1].items.len(), 1);
+    }
+
+    #[test]
+    fn test_add_todo_disabled_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.selected_sidebar_index = 1; // Tag("code")
+        app.add_todo("New item".into());
+        assert_eq!(app.lists[0].items.len(), 1); // unchanged
+    }
+
+    #[test]
+    fn test_move_todo_disabled_in_tag_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        work.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.active_pane = Pane::Main;
+        app.selected_sidebar_index = 1;
+        app.selected_item_index = 0;
+        app.move_todo_down();
+        assert_eq!(app.lists[0].items[0].title, "A");
+        assert_eq!(app.lists[0].items[1].title, "B");
+    }
+
+    #[test]
+    fn test_search_finds_tags() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into(), "code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.start_search();
+        app.input_buffer = "urg".into();
+        app.input_cursor = 3;
+        app.update_search_results();
+        assert!(app.search_results.len() >= 2);
+        assert_eq!(app.search_results[0], SearchResult::Tag("urgent".into()));
+    }
+
+    #[test]
+    fn test_search_tag_result_no_duplicates() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        work.items.push(TodoItem {
+            title: "B".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.start_search();
+        app.input_buffer = "urgent".into();
+        app.input_cursor = 6;
+        app.update_search_results();
+        let tag_results: Vec<_> = app
+            .search_results
+            .iter()
+            .filter(|r| matches!(r, SearchResult::Tag(_)))
+            .collect();
+        assert_eq!(tag_results.len(), 1);
+    }
+
+    #[test]
+    fn test_select_search_result_tag() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["code".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.start_search();
+        app.input_buffer = "code".into();
+        app.input_cursor = 4;
+        app.update_search_results();
+        app.select_search_result();
+        assert!(app.is_tag_view());
+        assert_eq!(app.selected_tag_name(), Some("code"));
+        assert_eq!(app.active_pane, Pane::Main);
     }
 }
