@@ -893,9 +893,8 @@ impl App {
             InputMode::EditingItem => self.edit_todo_title(buffer),
             InputMode::EditingTags => self.edit_todo_tags(buffer),
             InputMode::EditingTime => {
-                if let Some(secs) = storage::parse_time_str(&buffer) {
-                    self.set_item_time(secs);
-                }
+                let secs = storage::parse_time_str(&buffer).unwrap_or(0);
+                self.set_item_time(secs);
             }
             _ => {}
         }
@@ -2027,6 +2026,17 @@ mod tests {
         app.lists[0].items[0].time_secs = 3600;
         app.set_item_time(5400);
         assert_eq!(app.lists[0].items[0].time_secs, 5400);
+    }
+
+    #[test]
+    fn test_edit_time_clear() {
+        let mut app = sample_app();
+        app.selected_item_index = 0;
+        app.lists[0].items[0].time_secs = 3600;
+        app.input_mode = InputMode::EditingTime;
+        app.input_buffer.clear();
+        app.confirm_input();
+        assert_eq!(app.lists[0].items[0].time_secs, 0);
     }
 
     #[test]
