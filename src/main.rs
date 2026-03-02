@@ -23,9 +23,10 @@ fn main() -> Result<()> {
 
     let mut app = app::App::new(data_dir.clone(), ascii_mode)?;
     app.reset_daily_lists();
+    let mut current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let terminal = ratatui::init();
-    let result = run(&mut app, terminal);
+    let result = run(&mut app, terminal, &mut current_date);
     ratatui::restore();
     storage::release_lock(&data_dir);
     result
@@ -55,10 +56,16 @@ fn parse_args() -> (PathBuf, bool) {
     (data_dir, ascii_mode)
 }
 
-fn run(app: &mut app::App, mut terminal: DefaultTerminal) -> Result<()> {
+fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut String) -> Result<()> {
     let mut show_help = false;
 
     while app.running {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if today != *current_date {
+            *current_date = today;
+            app.reset_daily_lists();
+        }
+
         terminal.draw(|frame| {
             ui::render(app, frame);
             if show_help {

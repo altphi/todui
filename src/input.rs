@@ -19,7 +19,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     let modifiers = key.modifiers;
 
     match (modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Char('q')) => {
+        (m, KeyCode::Char('q' | 'Q')) if m.contains(KeyModifiers::ALT) => {
             app.quit();
             return;
         }
@@ -39,7 +39,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             app.move_selection_down();
             return;
         }
-        (KeyModifiers::ALT, KeyCode::Char('u')) => {
+        (m, KeyCode::Char('u' | 'U')) if m.contains(KeyModifiers::ALT) => {
             app.undo();
             return;
         }
@@ -85,7 +85,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
     let tag_view = app.is_tag_view();
     match (key.modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Char('k')) => {
+        (KeyModifiers::ALT, KeyCode::Enter) => {
             app.toggle_done_selected();
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -105,7 +105,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.start_input(InputMode::EditingTags, &tags_str);
             }
         }
-        (KeyModifiers::ALT, KeyCode::Char('x')) => {
+        (m, KeyCode::Char('x' | 'X')) if m.contains(KeyModifiers::ALT) => {
             if !tag_view {
                 app.toggle_select_current();
             }
@@ -117,7 +117,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.delete_selected();
             }
         }
-        (KeyModifiers::ALT, KeyCode::Char('m')) => {
+        (m, KeyCode::Char('m' | 'M')) if m.contains(KeyModifiers::ALT) => {
             if !tag_view {
                 app.start_move_to_list();
             }
@@ -191,10 +191,10 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
         return;
     }
     match (key.modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Char('d')) => {
+        (m, KeyCode::Char('d' | 'D')) if m.contains(KeyModifiers::ALT) => {
             app.toggle_list_type();
         }
-        (KeyModifiers::ALT, KeyCode::Char('n')) => {
+        (m, KeyCode::Char('n' | 'N')) if m.contains(KeyModifiers::ALT) => {
             app.start_input(InputMode::AddingList, "");
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -481,7 +481,7 @@ mod tests {
         let mut app = sample_app();
         assert!(!app.lists[0].items[0].done);
 
-        handle_key(&mut app, alt(KeyCode::Char('k')));
+        handle_key(&mut app, alt(KeyCode::Enter));
         assert!(app.lists[0].items[0].done);
     }
 
@@ -1178,7 +1178,7 @@ mod tests {
         let mut app = App::with_lists(vec![work]);
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
-        handle_key(&mut app, alt(KeyCode::Char('k')));
+        handle_key(&mut app, alt(KeyCode::Enter));
         assert!(app.lists[0].items[0].done);
     }
 

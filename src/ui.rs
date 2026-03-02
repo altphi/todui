@@ -506,7 +506,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             };
             if !app.selected_items.is_empty() {
                 format!(
-                    "  {} selected  Del: delete  \u{2325}K: toggle done  \u{2325}M: move  Esc: clear{}",
+                    "  {} selected  Del: delete  \u{2325}\u{23ce}: done done  \u{2325}M: move  Esc: clear{}",
                     app.selected_items.len(),
                     filter_indicator
                 )
@@ -528,12 +528,12 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                     Pane::Main => {
                         if app.is_tag_view() {
                             format!(
-                                "  \u{2191}/\u{2193}: navigate  \u{2325}K: toggle  Enter: edit  Del: delete  type: search{}",
+                                "  \u{2191}/\u{2193}: navigate  \u{2325}\u{23ce}: done  Enter: edit  Del: delete  type: search{}",
                                 filter_indicator
                             )
                         } else {
                             format!(
-                                "  \u{2191}/\u{2193}: navigate  \u{2325}K: toggle  Space: new  Enter: edit  \u{2325}X: select  Del: delete  \u{2325}M: move  type: search{}",
+                                "  \u{2191}/\u{2193}: navigate  \u{2325}\u{23ce}: done  Space: new  Enter: edit  \u{2325}X: select  Del: delete  \u{2325}M: move  type: search{}",
                                 filter_indicator
                             )
                         }
@@ -791,7 +791,7 @@ pub fn render_help(frame: &mut Frame) {
         section("Todos"),
         help_row("Space", "New todo"),
         help_row("Enter", "Edit todo title"),
-        help_row("Alt+K", "Toggle done"),
+        help_row("Alt+Enter", "Toggle done"),
         help_row("Alt+T", "Edit tags"),
         help_row("Alt+X", "Toggle select"),
         help_row("Del / Backspace", "Delete todo(s)"),
