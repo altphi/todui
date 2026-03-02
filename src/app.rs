@@ -1277,6 +1277,7 @@ impl App {
             let mut reset_items: Vec<TodoItem> = Vec::new();
             for &idx in &done_indices {
                 self.lists[i].items[idx].done = false;
+                self.lists[i].items[idx].time_secs = 0;
                 reset_items.push(self.lists[i].items[idx].clone());
             }
             for &idx in done_indices.iter().rev() {
@@ -2663,10 +2664,13 @@ mod tests {
         list.list_type = ListType::Daily;
         list.last_reset = Some("2020-01-01".to_string());
         list.items.push(TodoItem::new("A"));
+        list.items[0].time_secs = 300;
         list.items.push(TodoItem::new("B"));
         list.items[1].done = true;
+        list.items[1].time_secs = 600;
         list.items.push(TodoItem::new("C"));
         list.items[2].done = true;
+        list.items[2].time_secs = 900;
 
         let mut app = App::with_lists(vec![list]);
         app.reset_daily_lists();
@@ -2678,6 +2682,10 @@ mod tests {
         assert_eq!(app.lists[0].items[0].title, "A");
         assert_eq!(app.lists[0].items[1].title, "B");
         assert_eq!(app.lists[0].items[2].title, "C");
+        // A (not done) keeps its timer, B and C (were done) get cleared
+        assert_eq!(app.lists[0].items[0].time_secs, 300);
+        assert_eq!(app.lists[0].items[1].time_secs, 0);
+        assert_eq!(app.lists[0].items[2].time_secs, 0);
     }
 
     #[test]
