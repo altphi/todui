@@ -248,6 +248,77 @@ pub fn release_lock(dir: &Path) {
     }
 }
 
+pub fn list_contexts(dir: &Path) -> Vec<String> {
+    let mut contexts: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|_| fs::read_dir(".").unwrap())
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                && !entry.file_name().to_string_lossy().starts_with('.')
+        })
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    contexts.sort();
+    contexts
+}
+
+pub fn migrate_to_contexts(dir: &Path) -> io::Result<()> {
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        return Ok(());
+    }
+
+    let has_subdirs = fs::read_dir(dir)?.filter_map(|e| e.ok()).any(|e| {
+        e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+            && !e.file_name().to_string_lossy().starts_with('.')
+    });
+    if has_subdirs {
+        return Ok(());
+    }
+
+    let md_files: Vec<_> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect();
+    if md_files.is_empty() {
+        return Ok(());
+    }
+
+    let default_dir = dir.join("default");
+    fs::create_dir_all(&default_dir)?;
+
+    for entry in md_files {
+        let dest = default_dir.join(entry.file_name());
+        fs::rename(entry.path(), dest)?;
+    }
+
+    let order_path = dir.join(".order");
+    if order_path.exists() {
+        fs::rename(&order_path, default_dir.join(".order"))?;
+    }
+
+    Ok(())
+}
+
+pub fn save_last_context(dir: &Path, name: &str) -> io::Result<()> {
+    fs::write(dir.join(".context"), name)
+}
+
+pub fn load_last_context(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join(".context"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn create_context_dir(dir: &Path, name: &str) -> io::Result<()> {
+    let context_dir = dir.join(name);
+    fs::create_dir_all(&context_dir)?;
+    let inbox = TodoList::new("Inbox");
+    save_list(&context_dir, &inbox)?;
+    Ok(())
+}
+
 pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
     let filename = name_to_filename(list_name);
     let path = dir.join(filename);
@@ -699,5 +770,88 @@ mod tests {
         assert_eq!(list.list_type, ListType::Normal);
         assert_eq!(list.last_reset, None);
         assert_eq!(list.items.len(), 2);
+    }
+
+    #[test]
+    fn test_list_contexts_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contexts = list_contexts(tmp.path());
+        assert!(contexts.is_empty());
+    }
+
+    #[test]
+    fn test_list_contexts_finds_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("work")).unwrap();
+        fs::create_dir(tmp.path().join("home")).unwrap();
+        fs::create_dir(tmp.path().join(".hidden")).unwrap();
+        fs::write(tmp.path().join("file.txt"), "not a dir").unwrap();
+        let contexts = list_contexts(tmp.path());
+        assert_eq!(contexts, vec!["home", "work"]);
+    }
+
+    #[test]
+    fn test_migrate_to_contexts_moves_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("inbox.md"), "# Inbox\n").unwrap();
+        fs::write(dir.join("work.md"), "# Work\n").unwrap();
+        fs::write(dir.join(".order"), "inbox.md\nwork.md\n").unwrap();
+
+        migrate_to_contexts(&dir).unwrap();
+
+        assert!(!dir.join("inbox.md").exists());
+        assert!(!dir.join("work.md").exists());
+        assert!(!dir.join(".order").exists());
+        assert!(dir.join("default").join("inbox.md").exists());
+        assert!(dir.join("default").join("work.md").exists());
+        assert!(dir.join("default").join(".order").exists());
+    }
+
+    #[test]
+    fn test_migrate_to_contexts_noop_with_subdirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(dir.join("existing")).unwrap();
+        fs::write(dir.join("stray.md"), "# Stray\n").unwrap();
+
+        migrate_to_contexts(&dir).unwrap();
+
+        assert!(dir.join("stray.md").exists());
+        assert!(!dir.join("default").exists());
+    }
+
+    #[test]
+    fn test_migrate_to_contexts_noop_no_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("todos");
+        fs::create_dir_all(&dir).unwrap();
+
+        migrate_to_contexts(&dir).unwrap();
+
+        assert!(!dir.join("default").exists());
+    }
+
+    #[test]
+    fn test_save_load_last_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        save_last_context(tmp.path(), "work").unwrap();
+        assert_eq!(load_last_context(tmp.path()), Some("work".to_string()));
+    }
+
+    #[test]
+    fn test_load_last_context_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(load_last_context(tmp.path()), None);
+    }
+
+    #[test]
+    fn test_create_context_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_context_dir(tmp.path(), "work").unwrap();
+        let work_dir = tmp.path().join("work");
+        assert!(work_dir.exists());
+        assert!(work_dir.join("inbox.md").exists());
     }
 }

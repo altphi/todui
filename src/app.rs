@@ -39,11 +39,15 @@ pub struct App {
     pub move_to_list_filter: String,
     pub sidebar_entries: Vec<SidebarEntry>,
     pub selected_sidebar_index: usize,
+    pub current_context: String,
+    pub context_cursor: usize,
+    pub context_filter: String,
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf, ascii_mode: bool) -> std::io::Result<Self> {
-        let lists = storage::load_lists(&data_dir)?;
+    pub fn new(data_dir: PathBuf, context: String, ascii_mode: bool) -> std::io::Result<Self> {
+        let context_dir = data_dir.join(&context);
+        let lists = storage::load_lists(&context_dir)?;
         let mut app = Self {
             lists,
             active_pane: Pane::Sidebar,
@@ -76,6 +80,9 @@ impl App {
             move_to_list_filter: String::new(),
             sidebar_entries: Vec::new(),
             selected_sidebar_index: 0,
+            current_context: context,
+            context_cursor: 0,
+            context_filter: String::new(),
         };
         app.rebuild_sidebar_entries();
         Ok(app)
@@ -115,9 +122,105 @@ impl App {
             move_to_list_filter: String::new(),
             sidebar_entries: Vec::new(),
             selected_sidebar_index: 0,
+            current_context: "test".into(),
+            context_cursor: 0,
+            context_filter: String::new(),
         };
         app.rebuild_sidebar_entries();
         app
+    }
+
+    pub fn context_dir(&self) -> PathBuf {
+        self.data_dir.join(&self.current_context)
+    }
+
+    pub fn available_contexts(&self) -> Vec<String> {
+        storage::list_contexts(&self.data_dir)
+    }
+
+    pub fn context_targets(&self) -> Vec<String> {
+        let query = self.context_filter.to_lowercase();
+        self.available_contexts()
+            .into_iter()
+            .filter(|c| c != &self.current_context)
+            .filter(|c| query.is_empty() || c.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    pub fn start_switch_context(&mut self) {
+        self.context_cursor = 0;
+        self.context_filter.clear();
+        self.input_mode = InputMode::SwitchingContext;
+    }
+
+    pub fn switch_context(&mut self, name: &str) {
+        let _ = storage::save_all(&self.context_dir(), &self.lists);
+        let _ = storage::save_order(&self.context_dir(), &self.lists);
+        self.current_context = name.to_string();
+        self.lists = storage::load_lists(&self.context_dir())
+            .unwrap_or_else(|_| vec![TodoList::new("Inbox")]);
+        self.selected_list_index = 0;
+        self.selected_item_index = 0;
+        self.selected_sidebar_index = 0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selected_items.clear();
+        self.filter_tags.clear();
+        self.rebuild_sidebar_entries();
+        let _ = storage::save_last_context(&self.data_dir, name);
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn create_context(&mut self, name: String) {
+        let slug = name.to_lowercase().replace(' ', "-");
+        if slug.is_empty() {
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+        let _ = storage::create_context_dir(&self.data_dir, &slug);
+        self.switch_context(&slug);
+    }
+
+    pub fn context_move_up(&mut self) {
+        if self.context_cursor > 0 {
+            self.context_cursor -= 1;
+        }
+    }
+
+    pub fn context_move_down(&mut self) {
+        let targets = self.context_targets();
+        let total = targets.len() + 1; // +1 for "new context" option
+        if self.context_cursor + 1 < total {
+            self.context_cursor += 1;
+        }
+    }
+
+    pub fn context_insert_char(&mut self, c: char) {
+        self.context_filter.push(c);
+        self.context_cursor = 0;
+    }
+
+    pub fn context_delete_char(&mut self) {
+        self.context_filter.pop();
+        self.context_cursor = 0;
+    }
+
+    pub fn confirm_context_switch(&mut self) {
+        let targets = self.context_targets();
+        if self.context_cursor < targets.len() {
+            let name = targets[self.context_cursor].clone();
+            self.switch_context(&name);
+        } else {
+            self.context_filter.clear();
+            self.input_mode = InputMode::CreatingContext;
+            self.input_buffer.clear();
+            self.input_cursor = 0;
+        }
+    }
+
+    pub fn cancel_context_switch(&mut self) {
+        self.context_filter.clear();
+        self.input_mode = InputMode::Normal;
     }
 
     fn snapshot(&self) -> AppSnapshot {
@@ -808,7 +911,7 @@ impl App {
         if let Some(list) = self.current_list() {
             let old_name = list.name.clone();
             self.push_undo();
-            let _ = storage::delete_list_file(&self.data_dir, &old_name);
+            let _ = storage::delete_list_file(&self.context_dir(), &old_name);
             if let Some(list) = self.current_list_mut() {
                 list.name = new_name;
             }
@@ -823,7 +926,7 @@ impl App {
         }
         self.push_undo();
         let list_name = self.lists[self.selected_list_index].name.clone();
-        let _ = storage::delete_list_file(&self.data_dir, &list_name);
+        let _ = storage::delete_list_file(&self.context_dir(), &list_name);
         self.lists.remove(self.selected_list_index);
         self.rebuild_sidebar_entries();
         self.clamp_selection();
@@ -895,6 +998,10 @@ impl App {
             InputMode::EditingTime => {
                 let secs = storage::parse_time_str(&buffer).unwrap_or(0);
                 self.set_item_time(secs);
+            }
+            InputMode::CreatingContext => {
+                self.create_context(buffer);
+                return;
             }
             _ => {}
         }
@@ -1193,7 +1300,7 @@ impl App {
         self.clamp_selection();
 
         self.save_current_list();
-        let _ = storage::save_list(&self.data_dir, &self.lists[target_list_idx]);
+        let _ = storage::save_list(&self.context_dir(), &self.lists[target_list_idx]);
     }
 
     pub fn move_to_list_insert_char(&mut self, c: char) {
@@ -1213,18 +1320,18 @@ impl App {
 
     fn save_current_list(&self) {
         if let Some(list) = self.current_list() {
-            let _ = storage::save_list(&self.data_dir, list);
+            let _ = storage::save_list(&self.context_dir(), list);
         }
     }
 
     fn save_list_at(&self, index: usize) {
         if let Some(list) = self.lists.get(index) {
-            let _ = storage::save_list(&self.data_dir, list);
+            let _ = storage::save_list(&self.context_dir(), list);
         }
     }
 
     fn save_order(&self) {
-        let _ = storage::save_order(&self.data_dir, &self.lists);
+        let _ = storage::save_order(&self.context_dir(), &self.lists);
     }
 
     pub fn toggle_list_type(&mut self) {
@@ -1270,7 +1377,7 @@ impl App {
                 .collect();
             if done_indices.is_empty() {
                 self.lists[i].last_reset = Some(today.clone());
-                let _ = storage::save_list(&self.data_dir, &self.lists[i]);
+                let _ = storage::save_list(&self.context_dir(), &self.lists[i]);
                 continue;
             }
             let mut reset_items: Vec<TodoItem> = Vec::new();
@@ -1290,7 +1397,7 @@ impl App {
     }
 
     pub fn quit(&mut self) {
-        let _ = storage::save_all(&self.data_dir, &self.lists);
+        let _ = storage::save_all(&self.context_dir(), &self.lists);
         self.running = false;
     }
 }
@@ -3193,5 +3300,69 @@ mod tests {
         assert!(app.is_tag_view());
         assert_eq!(app.selected_tag_name(), Some("code"));
         assert_eq!(app.active_pane, Pane::Main);
+    }
+
+    #[test]
+    fn test_start_switch_context() {
+        let mut app = sample_app();
+        app.start_switch_context();
+        assert_eq!(app.input_mode, InputMode::SwitchingContext);
+        assert_eq!(app.context_cursor, 0);
+        assert!(app.context_filter.is_empty());
+    }
+
+    #[test]
+    fn test_cancel_context_switch() {
+        let mut app = sample_app();
+        app.start_switch_context();
+        app.context_filter = "test".into();
+        app.cancel_context_switch();
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.context_filter.is_empty());
+    }
+
+    #[test]
+    fn test_context_targets_excludes_current() {
+        let mut app = sample_app();
+        app.current_context = "work".into();
+        app.data_dir = PathBuf::from("/tmp/todui-ctx-test");
+        let targets = app.context_targets();
+        assert!(!targets.contains(&"work".to_string()));
+    }
+
+    #[test]
+    fn test_context_filter_insert_delete() {
+        let mut app = sample_app();
+        app.start_switch_context();
+        app.context_insert_char('w');
+        assert_eq!(app.context_filter, "w");
+        app.context_insert_char('o');
+        assert_eq!(app.context_filter, "wo");
+        app.context_delete_char();
+        assert_eq!(app.context_filter, "w");
+    }
+
+    #[test]
+    fn test_context_move_up_down() {
+        let mut app = sample_app();
+        app.start_switch_context();
+        assert_eq!(app.context_cursor, 0);
+        // With no real contexts, only "new context" option exists at index 0
+        // Can't move past it
+        app.context_move_down();
+        assert_eq!(app.context_cursor, 0);
+        app.context_move_up();
+        assert_eq!(app.context_cursor, 0);
+    }
+
+    #[test]
+    fn test_confirm_context_switch_new_context() {
+        let mut app = sample_app();
+        app.start_switch_context();
+        // With no available contexts, cursor 0 = "new context" option
+        let targets = app.context_targets();
+        app.context_cursor = targets.len(); // "new context" is last
+        app.confirm_context_switch();
+        assert_eq!(app.input_mode, InputMode::CreatingContext);
     }
 }

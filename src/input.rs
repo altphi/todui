@@ -11,6 +11,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         InputMode::Focused => handle_focus_mode(app, key),
         InputMode::FilteringTags => handle_filter_mode(app, key),
         InputMode::MovingToList => handle_move_to_list_mode(app, key),
+        InputMode::SwitchingContext => handle_context_mode(app, key),
         _ => handle_input_mode(app, key),
     }
 }
@@ -71,6 +72,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         }
         (KeyModifiers::NONE, KeyCode::End) => {
             app.jump_to_last();
+            return;
+        }
+        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::ALT) => {
+            app.start_switch_context();
             return;
         }
         _ => {}
@@ -367,6 +372,30 @@ fn handle_move_to_list_mode(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char(c) => {
             app.move_to_list_insert_char(c);
+        }
+        _ => {}
+    }
+}
+
+fn handle_context_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            app.confirm_context_switch();
+        }
+        KeyCode::Esc => {
+            app.cancel_context_switch();
+        }
+        KeyCode::Up => {
+            app.context_move_up();
+        }
+        KeyCode::Down => {
+            app.context_move_down();
+        }
+        KeyCode::Backspace => {
+            app.context_delete_char();
+        }
+        KeyCode::Char(c) => {
+            app.context_insert_char(c);
         }
         _ => {}
     }
@@ -1213,5 +1242,48 @@ mod tests {
         app.selected_sidebar_index = 1;
         handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.lists[0].items.len(), 0);
+    }
+
+    #[test]
+    fn test_alt_c_opens_context_picker() {
+        let mut app = sample_app();
+        handle_key(&mut app, alt(KeyCode::Char('c')));
+        assert_eq!(app.input_mode, InputMode::SwitchingContext);
+    }
+
+    #[test]
+    fn test_alt_c_opens_context_picker_from_sidebar() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Sidebar;
+        handle_key(&mut app, alt(KeyCode::Char('c')));
+        assert_eq!(app.input_mode, InputMode::SwitchingContext);
+    }
+
+    #[test]
+    fn test_context_switch_esc() {
+        let mut app = sample_app();
+        handle_key(&mut app, alt(KeyCode::Char('c')));
+        assert_eq!(app.input_mode, InputMode::SwitchingContext);
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_context_switch_navigation() {
+        let mut app = sample_app();
+        handle_key(&mut app, alt(KeyCode::Char('c')));
+        assert_eq!(app.context_cursor, 0);
+        handle_key(&mut app, key(KeyCode::Down));
+        // just ensure no crash; exact value depends on available contexts
+    }
+
+    #[test]
+    fn test_context_switch_typing_filter() {
+        let mut app = sample_app();
+        handle_key(&mut app, alt(KeyCode::Char('c')));
+        handle_key(&mut app, key(KeyCode::Char('w')));
+        assert_eq!(app.context_filter, "w");
+        handle_key(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.context_filter, "");
     }
 }

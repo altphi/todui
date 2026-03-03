@@ -41,6 +41,8 @@ pub enum InputMode {
     EditingTime,
     FilteringTags,
     MovingToList,
+    SwitchingContext,
+    CreatingContext,
 }
 
 #[derive(Debug, Clone, PartialEq)]

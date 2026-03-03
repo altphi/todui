@@ -19,7 +19,7 @@ pub fn render(app: &App, frame: &mut Frame) {
         ])
         .split(frame.area());
 
-    render_title_bar(frame, outer[0]);
+    render_title_bar(app, frame, outer[0]);
 
     let longest_list_name = app
         .lists
@@ -56,7 +56,9 @@ pub fn render(app: &App, frame: &mut Frame) {
         InputMode::Focused => render_focus_overlay(app, frame),
         InputMode::FilteringTags => render_filter_modal(app, frame),
         InputMode::MovingToList => render_move_to_list_modal(app, frame),
-        InputMode::AddingItem
+        InputMode::SwitchingContext => render_context_modal(app, frame),
+        InputMode::CreatingContext
+        | InputMode::AddingItem
         | InputMode::EditingItem
         | InputMode::EditingTags
         | InputMode::AddingList
@@ -71,9 +73,10 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
 }
 
-fn render_title_bar(frame: &mut Frame, area: Rect) {
+fn render_title_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let title_text = app.current_context.clone();
     let title = Paragraph::new(Line::from(vec![Span::styled(
-        "  todui",
+        title_text,
         Style::default()
             .fg(Color::White)
             .bg(Color::DarkGray)
@@ -348,12 +351,12 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
     {
         let hint = if app.current_list().is_some() {
             if !app.show_done {
-                "All items completed. Press Shift+D to show."
+                "All items completed. Press Alt+Shift+D to hide/show."
             } else {
-                "No items. Press n to add one."
+                "No items. Press <space> to add one."
             }
         } else {
-            "No items. Press n to add one."
+            "No items. Press <space> to add one."
         };
         let hint_paragraph = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint_paragraph, inner);
@@ -491,7 +494,11 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         InputMode::MovingToList => {
             "  \u{2191}/\u{2193}: navigate  Enter: move  Esc: cancel".to_string()
         }
-        InputMode::AddingItem
+        InputMode::SwitchingContext => {
+            "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel".to_string()
+        }
+        InputMode::CreatingContext
+        | InputMode::AddingItem
         | InputMode::AddingList
         | InputMode::RenamingList
         | InputMode::EditingItem
@@ -563,6 +570,7 @@ fn render_input_modal(app: &App, frame: &mut Frame) {
         InputMode::AddingList => " New List ",
         InputMode::RenamingList => " Rename ",
         InputMode::EditingTime => " Set Time ",
+        InputMode::CreatingContext => " New Context ",
         _ => "",
     };
 
@@ -820,6 +828,7 @@ pub fn render_help(frame: &mut Frame) {
         Line::from(""),
         section("General"),
         help_row("Type any character", "Search"),
+        help_row("Alt+C", "Switch context"),
         help_row("Alt+U / Ctrl+Z", "Undo"),
         help_row("Ctrl+Y", "Redo"),
         help_row("?", "Toggle help"),
@@ -1013,6 +1022,76 @@ fn render_move_to_list_modal(app: &App, frame: &mut Frame) {
         let list_widget = List::new(items);
         frame.render_widget(list_widget, chunks[2]);
     }
+}
+
+fn render_context_modal(app: &App, frame: &mut Frame) {
+    let targets = app.context_targets();
+    let item_count = (targets.len() + 1).max(1) as u16; // +1 for "new context"
+    let height = (item_count + 4).min(20);
+    let width: u16 = 40.min(frame.area().width.saturating_sub(4));
+
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Switch Context ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let input =
+        Paragraph::new(app.context_filter.as_str()).style(Style::default().fg(Color::Yellow));
+    frame.render_widget(input, chunks[0]);
+
+    let cursor_x = chunks[0].x + app.context_filter.len() as u16;
+    let cursor_y = chunks[0].y;
+    frame.set_cursor_position((cursor_x, cursor_y));
+
+    let sep_width = chunks[1].width as usize;
+    let separator =
+        Paragraph::new("\u{2500}".repeat(sep_width)).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(separator, chunks[1]);
+
+    let mut items: Vec<ListItem> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let is_selected = i == app.context_cursor;
+            let display = name.clone();
+            let style = if is_selected {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(format!("  {}", display), style)))
+        })
+        .collect();
+
+    let new_idx = targets.len();
+    let is_new_selected = app.context_cursor == new_idx;
+    let new_style = if is_new_selected {
+        Style::default().fg(Color::Green).bg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    items.push(ListItem::new(Line::from(Span::styled(
+        "  + New context...",
+        new_style,
+    ))));
+
+    let list_widget = List::new(items);
+    frame.render_widget(list_widget, chunks[2]);
 }
 
 fn render_autocomplete_dropdown(app: &App, frame: &mut Frame) {

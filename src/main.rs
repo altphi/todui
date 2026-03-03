@@ -16,12 +16,19 @@ fn main() -> Result<()> {
 
     let (data_dir, ascii_mode) = parse_args();
 
+    if let Err(e) = storage::migrate_to_contexts(&data_dir) {
+        eprintln!("Error migrating data: {}", e);
+        std::process::exit(1);
+    }
+
+    let context = storage::load_last_context(&data_dir).unwrap_or_else(|| "default".into());
+
     if let Err(e) = storage::acquire_lock(&data_dir) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 
-    let mut app = app::App::new(data_dir.clone(), ascii_mode)?;
+    let mut app = app::App::new(data_dir.clone(), context, ascii_mode)?;
     app.reset_daily_lists();
     let mut current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
