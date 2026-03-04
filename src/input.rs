@@ -7,6 +7,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::ConfirmDelete => handle_confirm_delete(app, key),
+        InputMode::ConfirmArchive => handle_confirm_archive(app, key),
         InputMode::Searching => handle_search_mode(app, key),
         InputMode::Focused => handle_focus_mode(app, key),
         InputMode::FilteringTags => handle_filter_mode(app, key),
@@ -171,6 +172,9 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 };
                 app.start_input(InputMode::EditingTime, &prefill);
             }
+        }
+        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::ALT) => {
+            app.start_archive();
         }
         (KeyModifiers::NONE, KeyCode::Char(' ')) => {
             if !tag_view {
@@ -406,6 +410,18 @@ fn handle_confirm_delete(app: &mut App, key: KeyEvent) {
         KeyCode::Char('y') => {
             app.input_mode = InputMode::Normal;
             app.delete_list();
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+}
+
+fn handle_confirm_archive(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') => {
+            app.archive_done_items();
         }
         KeyCode::Char('n') | KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
@@ -1285,5 +1301,53 @@ mod tests {
         assert_eq!(app.context_filter, "w");
         handle_key(&mut app, key(KeyCode::Backspace));
         assert_eq!(app.context_filter, "");
+    }
+
+    #[test]
+    fn test_alt_a_starts_archive() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Main;
+        app.lists[0].items[0].done = true;
+
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT);
+        handle_key(&mut app, key);
+
+        assert_eq!(app.input_mode, InputMode::ConfirmArchive);
+    }
+
+    #[test]
+    fn test_confirm_archive_y_archives() {
+        let mut app = sample_app();
+        app.active_pane = Pane::Main;
+        app.lists[0].items[0].done = true;
+        app.input_mode = InputMode::ConfirmArchive;
+
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        handle_key(&mut app, key);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.lists[0].items.iter().all(|i| !i.done));
+    }
+
+    #[test]
+    fn test_confirm_archive_n_cancels() {
+        let mut app = sample_app();
+        app.input_mode = InputMode::ConfirmArchive;
+
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        handle_key(&mut app, key);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_confirm_archive_esc_cancels() {
+        let mut app = sample_app();
+        app.input_mode = InputMode::ConfirmArchive;
+
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key(&mut app, key);
+
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 }

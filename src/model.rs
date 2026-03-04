@@ -36,6 +36,7 @@ pub enum InputMode {
     EditingItem,
     EditingTags,
     ConfirmDelete,
+    ConfirmArchive,
     Searching,
     Focused,
     EditingTime,
@@ -114,5 +115,11 @@ mod tests {
         assert!(list.items.is_empty());
         assert_eq!(list.list_type, ListType::Normal);
         assert_eq!(list.last_reset, None);
+    }
+
+    #[test]
+    fn test_confirm_archive_mode_exists() {
+        let mode = InputMode::ConfirmArchive;
+        assert_eq!(mode, InputMode::ConfirmArchive);
     }
 }

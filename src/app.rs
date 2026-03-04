@@ -1216,6 +1216,45 @@ impl App {
         self.save_current_list();
     }
 
+    pub fn done_count(&self) -> usize {
+        self.current_list()
+            .map(|list| list.items.iter().filter(|item| item.done).count())
+            .unwrap_or(0)
+    }
+
+    pub fn start_archive(&mut self) {
+        if self.done_count() == 0 {
+            return;
+        }
+        self.input_mode = InputMode::ConfirmArchive;
+    }
+
+    pub fn archive_done_items(&mut self) {
+        let Some(list) = self.current_list() else {
+            return;
+        };
+        let done_items: Vec<_> = list
+            .items
+            .iter()
+            .filter(|item| item.done)
+            .cloned()
+            .collect();
+        if done_items.is_empty() {
+            return;
+        }
+        let list_name = list.name.clone();
+        self.push_undo();
+        let _ = storage::append_to_archive(&self.context_dir(), &list_name, &done_items);
+        if let Some(list) = self.current_list_mut() {
+            list.items.retain(|item| !item.done);
+        }
+        self.selected_items.clear();
+        self.rebuild_sidebar_entries();
+        self.clamp_selection();
+        self.save_current_list();
+        self.input_mode = InputMode::Normal;
+    }
+
     pub fn move_to_list_targets(&self) -> Vec<(usize, &str)> {
         let query = self.move_to_list_filter.to_lowercase();
         self.lists
@@ -3364,5 +3403,85 @@ mod tests {
         app.context_cursor = targets.len(); // "new context" is last
         app.confirm_context_switch();
         assert_eq!(app.input_mode, InputMode::CreatingContext);
+    }
+
+    #[test]
+    fn test_start_archive_sets_confirm_mode() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem::new("Task A"));
+        let mut done_item = TodoItem::new("Task B");
+        done_item.done = true;
+        list.items.push(done_item);
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+
+        app.start_archive();
+
+        assert_eq!(app.input_mode, InputMode::ConfirmArchive);
+    }
+
+    #[test]
+    fn test_start_archive_noop_when_no_done_items() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem::new("Task A"));
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+
+        app.start_archive();
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_archive_done_items_removes_done() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem::new("Keep this"));
+        let mut done1 = TodoItem::new("Done 1");
+        done1.done = true;
+        list.items.push(done1);
+        let mut done2 = TodoItem::new("Done 2");
+        done2.done = true;
+        list.items.push(done2);
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+        app.selected_list_index = 0;
+
+        app.archive_done_items();
+
+        assert_eq!(app.lists[0].items.len(), 1);
+        assert_eq!(app.lists[0].items[0].title, "Keep this");
+    }
+
+    #[test]
+    fn test_archive_done_items_supports_undo() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem::new("Keep"));
+        let mut done = TodoItem::new("Archive me");
+        done.done = true;
+        list.items.push(done);
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+        app.selected_list_index = 0;
+
+        app.archive_done_items();
+        assert_eq!(app.lists[0].items.len(), 1);
+
+        app.undo();
+        assert_eq!(app.lists[0].items.len(), 2);
+    }
+
+    #[test]
+    fn test_archive_count_done() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem::new("Not done"));
+        let mut d1 = TodoItem::new("Done 1");
+        d1.done = true;
+        list.items.push(d1);
+        let mut d2 = TodoItem::new("Done 2");
+        d2.done = true;
+        list.items.push(d2);
+        let app = App::with_lists(vec![list]);
+
+        assert_eq!(app.done_count(), 2);
     }
 }

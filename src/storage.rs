@@ -101,6 +101,28 @@ pub fn parse_list(content: &str) -> TodoList {
     }
 }
 
+fn serialize_item(item: &TodoItem) -> String {
+    let checkbox = if item.done { "[x]" } else { "[ ]" };
+    let time = format_time(item.time_secs);
+    let time_part = if time.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", time)
+    };
+    if item.tags.is_empty() {
+        format!("- {} {}{}\n", checkbox, item.title, time_part)
+    } else {
+        let tags: Vec<String> = item.tags.iter().map(|t| format!("@{}", t)).collect();
+        format!(
+            "- {} {}{} {}\n",
+            checkbox,
+            item.title,
+            time_part,
+            tags.join(" ")
+        )
+    }
+}
+
 pub fn serialize_list(list: &TodoList) -> String {
     let mut output = format!("# {}\n", list.name);
     if list.list_type == ListType::Daily {
@@ -111,25 +133,7 @@ pub fn serialize_list(list: &TodoList) -> String {
     }
     output.push('\n');
     for item in &list.items {
-        let checkbox = if item.done { "[x]" } else { "[ ]" };
-        let time = format_time(item.time_secs);
-        let time_part = if time.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", time)
-        };
-        if item.tags.is_empty() {
-            output.push_str(&format!("- {} {}{}\n", checkbox, item.title, time_part));
-        } else {
-            let tags: Vec<String> = item.tags.iter().map(|t| format!("@{}", t)).collect();
-            output.push_str(&format!(
-                "- {} {}{} {}\n",
-                checkbox,
-                item.title,
-                time_part,
-                tags.join(" ")
-            ));
-        }
+        output.push_str(&serialize_item(item));
     }
     output
 }
@@ -325,6 +329,34 @@ pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
     if path.exists() {
         fs::remove_file(path)?;
     }
+    Ok(())
+}
+
+pub fn append_to_archive(
+    context_dir: &Path,
+    list_name: &str,
+    items: &[TodoItem],
+) -> io::Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let archive_dir = context_dir.join(".archive");
+    fs::create_dir_all(&archive_dir)?;
+    let filename = name_to_filename(list_name);
+    let archive_path = archive_dir.join(filename);
+
+    let mut content = String::new();
+    for item in items {
+        content.push_str(&serialize_item(item));
+    }
+
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(archive_path)?;
+    file.write_all(content.as_bytes())?;
     Ok(())
 }
 
@@ -853,5 +885,59 @@ mod tests {
         let work_dir = tmp.path().join("work");
         assert!(work_dir.exists());
         assert!(work_dir.join("inbox.md").exists());
+    }
+
+    #[test]
+    fn test_append_to_archive_creates_dir_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let context_dir = tmp.path().join("ctx");
+        fs::create_dir_all(&context_dir).unwrap();
+
+        let items = vec![TodoItem {
+            title: "Done task".to_string(),
+            done: true,
+            tags: vec!["work".to_string()],
+            time_secs: 2700,
+        }];
+
+        append_to_archive(&context_dir, "work", &items).unwrap();
+
+        let archive_path = context_dir.join(".archive").join("work.md");
+        assert!(archive_path.exists());
+        let content = fs::read_to_string(&archive_path).unwrap();
+        assert!(content.contains("- [x] Done task [45m] @work"));
+    }
+
+    #[test]
+    fn test_append_to_archive_appends_to_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let context_dir = tmp.path().join("ctx");
+        let archive_dir = context_dir.join(".archive");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::write(archive_dir.join("inbox.md"), "- [x] Old task\n").unwrap();
+
+        let items = vec![TodoItem {
+            title: "New task".to_string(),
+            done: true,
+            tags: vec![],
+            time_secs: 0,
+        }];
+
+        append_to_archive(&context_dir, "inbox", &items).unwrap();
+
+        let content = fs::read_to_string(archive_dir.join("inbox.md")).unwrap();
+        assert!(content.contains("- [x] Old task"));
+        assert!(content.contains("- [x] New task"));
+    }
+
+    #[test]
+    fn test_append_to_archive_empty_items_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let context_dir = tmp.path().join("ctx");
+        fs::create_dir_all(&context_dir).unwrap();
+
+        append_to_archive(&context_dir, "work", &[]).unwrap();
+
+        assert!(!context_dir.join(".archive").exists());
     }
 }

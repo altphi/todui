@@ -52,6 +52,7 @@ pub fn render(app: &App, frame: &mut Frame) {
 
     match app.input_mode {
         InputMode::ConfirmDelete => render_confirm_dialog(app, frame),
+        InputMode::ConfirmArchive => render_confirm_archive_dialog(app, frame),
         InputMode::Searching => render_search_modal(app, frame),
         InputMode::Focused => render_focus_overlay(app, frame),
         InputMode::FilteringTags => render_filter_modal(app, frame),
@@ -484,6 +485,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let text: String = match app.input_mode {
         InputMode::ConfirmDelete => "  y: confirm delete  n/Esc: cancel".to_string(),
+        InputMode::ConfirmArchive => "  y: confirm archive  n/Esc: cancel".to_string(),
         InputMode::Searching => {
             "  \u{2191}/\u{2193}: navigate  Enter: select  Esc: cancel".to_string()
         }
@@ -641,6 +643,30 @@ fn render_confirm_dialog(app: &App, frame: &mut Frame) {
         .title(" Confirm ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));
+
+    let paragraph = Paragraph::new(text)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White));
+
+    frame.render_widget(paragraph, area);
+}
+
+fn render_confirm_archive_dialog(app: &App, frame: &mut Frame) {
+    let area = centered_rect(40, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let count = app.done_count();
+    let text = format!(
+        "Archive {} completed item{}?\n\ny: yes  n: no",
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+
+    let block = Block::default()
+        .title(" Confirm ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
 
     let paragraph = Paragraph::new(text)
         .block(block)
