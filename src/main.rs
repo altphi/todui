@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod input;
 mod model;
 mod storage;
@@ -28,7 +29,12 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let mut app = app::App::new(data_dir.clone(), context, ascii_mode)?;
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("todui");
+    let key_config = config::KeyConfig::load(&config_dir);
+
+    let mut app = app::App::new(data_dir.clone(), context, ascii_mode, key_config)?;
     app.reset_daily_lists();
     let mut current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -76,7 +82,7 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut Str
         terminal.draw(|frame| {
             ui::render(app, frame);
             if show_help {
-                ui::render_help(frame);
+                ui::render_help(frame, &app.key_config);
             }
         })?;
 

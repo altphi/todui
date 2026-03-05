@@ -14,6 +14,10 @@ TUI todo + time tracking in rust, using [ratatui](https://ratatui.rs).
 - Filter by tag (OR logic, multi-select)
 - Search across all lists, tags, and items — tags are searchable entities that navigate to their tag view
 - Focus mode with pause/resume timer and per-item time tracking
+- Archive completed items
+- Multiple contexts with switching
+- Configurable keybindings via `~/.config/todui/config.toml`
+- In-app help (`?`) that reflects your custom keybindings
 - Undo/redo
 - ASCII mode fallback
 - File-based persistence (Markdown)

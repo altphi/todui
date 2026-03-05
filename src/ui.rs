@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::config::{Action, KeyConfig};
 use crate::model::{InputMode, ListType, Pane, SearchResult, SidebarEntry};
 
 pub fn render(app: &App, frame: &mut Frame) {
@@ -796,8 +797,8 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
     }
 }
 
-pub fn render_help(frame: &mut Frame) {
-    let area = centered_rect(65, 35, frame.area());
+pub fn render_help(frame: &mut Frame, key_config: &KeyConfig) {
+    let area = centered_rect(65, 38, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -815,51 +816,91 @@ pub fn render_help(frame: &mut Frame) {
         ))
     };
 
-    let help_text = vec![
+    let n = &key_config.normal;
+    let m = &key_config.normal_main;
+    let s = &key_config.normal_sidebar;
+
+    let key = |keymaps: &[&std::collections::HashMap<_, _>], action: &Action| -> String {
+        key_config.action_keys(keymaps, action).unwrap_or_default()
+    };
+    let key_pair =
+        |keymaps: &[&std::collections::HashMap<_, _>], a: &Action, b: &Action| -> String {
+            let ka = key_config.action_keys(keymaps, a).unwrap_or_default();
+            let kb = key_config.action_keys(keymaps, b).unwrap_or_default();
+            format!("{ka} / {kb}")
+        };
+
+    let mut help_text = vec![
         section("Navigation"),
-        help_row("\u{2191} / \u{2193}", "Move up / down"),
-        help_row("Tab", "Switch pane"),
-        help_row("Home / End", "Jump to first / last"),
-        help_row("Ctrl+D / Ctrl+U", "Half-page down / up"),
+        help_row(
+            &key_pair(&[n], &Action::MoveUp, &Action::MoveDown),
+            "Move up / down",
+        ),
+        help_row(&key(&[n], &Action::TogglePane), "Switch pane"),
+        help_row(
+            &key_pair(&[n], &Action::JumpToFirst, &Action::JumpToLast),
+            "Jump to first / last",
+        ),
+        help_row(
+            &key_pair(&[n], &Action::PageDown, &Action::PageUp),
+            "Half-page down / up",
+        ),
         Line::from(""),
         section("Todos"),
-        help_row("Space", "New todo"),
-        help_row("Enter", "Edit todo title"),
-        help_row("Alt+Enter", "Toggle done"),
-        help_row("Alt+T", "Edit tags"),
-        help_row("Alt+X", "Toggle select"),
-        help_row("Del / Backspace", "Delete todo(s)"),
-        help_row("Alt+M", "Move to list"),
-        help_row("Esc", "Clear selection"),
+        help_row(&key(&[m], &Action::AddItem), "New todo"),
+        help_row(&key(&[m], &Action::EditItem), "Edit todo title"),
+        help_row(&key(&[m], &Action::ToggleDone), "Toggle done"),
+        help_row(&key(&[m], &Action::EditTags), "Edit tags"),
+        help_row(&key(&[m], &Action::ToggleSelect), "Toggle select"),
+        help_row(&key(&[m], &Action::Delete), "Delete todo(s)"),
+        help_row(&key(&[m], &Action::MoveToList), "Move to list"),
+        help_row(&key(&[m], &Action::ClearSelection), "Clear selection"),
         help_row(
-            "Shift+\u{2191}/\u{2193} / Alt+\u{2191}/\u{2193}",
+            &key_pair(&[m], &Action::MoveItemUp, &Action::MoveItemDown),
             "Reorder up / down",
         ),
-        help_row("Alt+Super+\u{2191}/\u{2193}", "Move to top / bottom"),
-        help_row("Alt+Shift+D", "Toggle show done"),
-        help_row("Alt+Shift+F", "Filter by tag"),
-        help_row("Alt+F", "Focus mode (timer)"),
-        help_row("Alt+Shift+T", "Edit time"),
+        help_row(
+            &key_pair(&[m], &Action::MoveItemToTop, &Action::MoveItemToBottom),
+            "Move to top / bottom",
+        ),
+        help_row(&key(&[m], &Action::ToggleShowDone), "Toggle show done"),
+        help_row(&key(&[m], &Action::StartFilter), "Filter by tag"),
+        help_row(&key(&[m], &Action::StartFocus), "Focus mode (timer)"),
+        help_row(&key(&[m], &Action::EditTime), "Edit time"),
+        help_row(&key(&[m], &Action::StartArchive), "Archive done"),
+    ];
+
+    for (key_display, tag) in key_config.toggle_tag_entries() {
+        help_text.push(help_row(&key_display, &format!("Toggle '{tag}'")));
+    }
+
+    help_text.extend([
         Line::from(""),
         section("Lists"),
-        help_row("Alt+N", "Add new list (sidebar)"),
-        help_row("Enter", "Rename list (sidebar)"),
-        help_row("Alt+D", "Toggle daily (auto-reset)"),
+        help_row(&key(&[s], &Action::AddList), "Add new list (sidebar)"),
+        help_row(&key(&[s], &Action::RenameList), "Rename list (sidebar)"),
         help_row(
-            "Shift+\u{2191}/\u{2193} / Alt+\u{2191}/\u{2193}",
+            &key(&[s], &Action::ToggleListType),
+            "Toggle daily (auto-reset)",
+        ),
+        help_row(
+            &key_pair(&[s], &Action::MoveListUp, &Action::MoveListDown),
             "Reorder up / down",
         ),
-        help_row("Alt+Super+\u{2191}/\u{2193}", "Move to top / bottom"),
-        help_row("Del / Backspace", "Delete list (sidebar)"),
+        help_row(
+            &key_pair(&[s], &Action::MoveListToTop, &Action::MoveListToBottom),
+            "Move to top / bottom",
+        ),
+        help_row(&key(&[s], &Action::DeleteList), "Delete list (sidebar)"),
         Line::from(""),
         section("General"),
         help_row("Type any character", "Search"),
-        help_row("Alt+C", "Switch context"),
-        help_row("Alt+U / Ctrl+Z", "Undo"),
-        help_row("Ctrl+Y", "Redo"),
+        help_row(&key(&[n], &Action::SwitchContext), "Switch context"),
+        help_row(&key(&[n], &Action::Undo), "Undo"),
+        help_row(&key(&[n], &Action::Redo), "Redo"),
         help_row("?", "Toggle help"),
-        help_row("Alt+Q", "Quit"),
-    ];
+        help_row(&key(&[n], &Action::Quit), "Quit"),
+    ]);
 
     let block = Block::default()
         .title(" Help ")

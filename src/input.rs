@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
+use crate::config::Action;
 use crate::model::{InputMode, Pane};
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -18,68 +19,62 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) {
-    let modifiers = key.modifiers;
+    let key_tuple = (key.modifiers, key.code);
 
-    match (modifiers, key.code) {
-        (m, KeyCode::Char('q' | 'Q')) if m.contains(KeyModifiers::ALT) => {
-            app.quit();
-            return;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-            app.quit();
-            return;
-        }
-        (_, KeyCode::Tab) => {
-            app.toggle_pane();
-            return;
-        }
-        (KeyModifiers::NONE, KeyCode::Up) => {
-            app.move_selection_up();
-            return;
-        }
-        (KeyModifiers::NONE, KeyCode::Down) => {
-            app.move_selection_down();
-            return;
-        }
-        (m, KeyCode::Char('u' | 'U')) if m.contains(KeyModifiers::ALT) => {
-            app.undo();
-            return;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('z')) => {
-            app.undo();
-            return;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('y')) => {
-            app.redo();
-            return;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-            if let Ok((_, rows)) = crossterm::terminal::size() {
-                let page_size = (rows as usize).saturating_sub(4);
-                app.page_down(page_size);
+    if let Some(action) = app.key_config.normal.get(&key_tuple) {
+        match action {
+            Action::Quit => {
+                app.quit();
+                return;
             }
-            return;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-            if let Ok((_, rows)) = crossterm::terminal::size() {
-                let page_size = (rows as usize).saturating_sub(4);
-                app.page_up(page_size);
+            Action::TogglePane => {
+                app.toggle_pane();
+                return;
             }
-            return;
+            Action::MoveUp => {
+                app.move_selection_up();
+                return;
+            }
+            Action::MoveDown => {
+                app.move_selection_down();
+                return;
+            }
+            Action::Undo => {
+                app.undo();
+                return;
+            }
+            Action::Redo => {
+                app.redo();
+                return;
+            }
+            Action::PageDown => {
+                if let Ok((_, rows)) = crossterm::terminal::size() {
+                    let page_size = (rows as usize).saturating_sub(4);
+                    app.page_down(page_size);
+                }
+                return;
+            }
+            Action::PageUp => {
+                if let Ok((_, rows)) = crossterm::terminal::size() {
+                    let page_size = (rows as usize).saturating_sub(4);
+                    app.page_up(page_size);
+                }
+                return;
+            }
+            Action::JumpToFirst => {
+                app.jump_to_first();
+                return;
+            }
+            Action::JumpToLast => {
+                app.jump_to_last();
+                return;
+            }
+            Action::SwitchContext => {
+                app.start_switch_context();
+                return;
+            }
+            _ => {}
         }
-        (KeyModifiers::NONE, KeyCode::Home) => {
-            app.jump_to_first();
-            return;
-        }
-        (KeyModifiers::NONE, KeyCode::End) => {
-            app.jump_to_last();
-            return;
-        }
-        (m, KeyCode::Char('c')) if m.contains(KeyModifiers::ALT) => {
-            app.start_switch_context();
-            return;
-        }
-        _ => {}
     }
 
     match app.active_pane {
@@ -90,103 +85,102 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
     let tag_view = app.is_tag_view();
-    match (key.modifiers, key.code) {
-        (KeyModifiers::ALT, KeyCode::Enter) => {
-            app.toggle_done_selected();
-        }
-        (KeyModifiers::NONE, KeyCode::Enter) => {
-            if let Some((li, ii)) = app.resolve_selected_item() {
-                let title = app.lists[li].items[ii].title.clone();
-                app.start_input(InputMode::EditingItem, &title);
+    let key_tuple = (key.modifiers, key.code);
+
+    if let Some(action) = app.key_config.normal_main.get(&key_tuple).cloned() {
+        match action {
+            Action::ToggleDone => app.toggle_done_selected(),
+            Action::EditItem => {
+                if let Some((li, ii)) = app.resolve_selected_item() {
+                    let title = app.lists[li].items[ii].title.clone();
+                    app.start_input(InputMode::EditingItem, &title);
+                }
             }
-        }
-        (KeyModifiers::ALT, KeyCode::Char('t')) => {
-            if let Some((li, ii)) = app.resolve_selected_item() {
-                let tags_str = app.lists[li].items[ii]
-                    .tags
-                    .iter()
-                    .map(|t| format!("@{}", t))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                app.start_input(InputMode::EditingTags, &tags_str);
+            Action::EditTags => {
+                if let Some((li, ii)) = app.resolve_selected_item() {
+                    let tags_str = app.lists[li].items[ii]
+                        .tags
+                        .iter()
+                        .map(|t| format!("@{}", t))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    app.start_input(InputMode::EditingTags, &tags_str);
+                }
             }
-        }
-        (m, KeyCode::Char('x' | 'X')) if m.contains(KeyModifiers::ALT) => {
-            if !tag_view {
-                app.toggle_select_current();
+            Action::ToggleSelect => {
+                if !tag_view {
+                    app.toggle_select_current();
+                }
             }
-        }
-        (_, KeyCode::Delete | KeyCode::Backspace) => {
-            if tag_view {
-                app.delete_todo();
-            } else {
-                app.delete_selected();
-            }
-        }
-        (m, KeyCode::Char('m' | 'M')) if m.contains(KeyModifiers::ALT) => {
-            if !tag_view {
-                app.start_move_to_list();
-            }
-        }
-        (KeyModifiers::NONE, KeyCode::Esc) => {
-            app.clear_selection();
-        }
-        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Up) => {
-            if !tag_view {
-                app.move_todo_up();
-            }
-        }
-        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::ALT, KeyCode::Down) => {
-            if !tag_view {
-                app.move_todo_down();
-            }
-        }
-        (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            if !tag_view {
-                app.move_todo_to_top();
-            }
-        }
-        (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            if !tag_view {
-                app.move_todo_to_bottom();
-            }
-        }
-        (m, KeyCode::Char('D')) if m.contains(KeyModifiers::ALT) => {
-            app.toggle_show_done();
-        }
-        (KeyModifiers::ALT, KeyCode::Char('f')) => {
-            app.start_focus();
-        }
-        (m, KeyCode::Char('F')) if m.contains(KeyModifiers::ALT) => {
-            if !tag_view {
-                app.start_filter();
-            }
-        }
-        (m, KeyCode::Char('T')) if m.contains(KeyModifiers::ALT) => {
-            if let Some((li, ii)) = app.resolve_selected_item() {
-                let time_str = crate::storage::format_time(app.lists[li].items[ii].time_secs);
-                let prefill = if time_str.is_empty() {
-                    "0m".to_string()
+            Action::Delete => {
+                if tag_view {
+                    app.delete_todo();
                 } else {
-                    time_str
-                };
-                app.start_input(InputMode::EditingTime, &prefill);
+                    app.delete_selected();
+                }
             }
-        }
-        (m, KeyCode::Char('a')) if m.contains(KeyModifiers::ALT) => {
-            app.start_archive();
-        }
-        (KeyModifiers::NONE, KeyCode::Char(' ')) => {
-            if !tag_view {
-                app.start_input(InputMode::AddingItem, "");
+            Action::MoveToList => {
+                if !tag_view {
+                    app.start_move_to_list();
+                }
             }
+            Action::ClearSelection => {
+                app.clear_selection();
+            }
+            Action::MoveItemUp => {
+                if !tag_view {
+                    app.move_todo_up();
+                }
+            }
+            Action::MoveItemDown => {
+                if !tag_view {
+                    app.move_todo_down();
+                }
+            }
+            Action::MoveItemToTop => {
+                if !tag_view {
+                    app.move_todo_to_top();
+                }
+            }
+            Action::MoveItemToBottom => {
+                if !tag_view {
+                    app.move_todo_to_bottom();
+                }
+            }
+            Action::ToggleShowDone => app.toggle_show_done(),
+            Action::StartFocus => app.start_focus(),
+            Action::StartFilter => {
+                if !tag_view {
+                    app.start_filter();
+                }
+            }
+            Action::EditTime => {
+                if let Some((li, ii)) = app.resolve_selected_item() {
+                    let time_str = crate::storage::format_time(app.lists[li].items[ii].time_secs);
+                    let prefill = if time_str.is_empty() {
+                        "0m".to_string()
+                    } else {
+                        time_str
+                    };
+                    app.start_input(InputMode::EditingTime, &prefill);
+                }
+            }
+            Action::StartArchive => app.start_archive(),
+            Action::AddItem => {
+                if !tag_view {
+                    app.start_input(InputMode::AddingItem, "");
+                }
+            }
+            Action::ToggleTag(tag) => app.toggle_tag(&tag),
+            _ => {}
         }
-        (KeyModifiers::NONE, KeyCode::Char(c)) => {
-            app.start_search();
-            app.input_insert_char(c);
-            app.update_search_results();
-        }
-        _ => {}
+        return;
+    }
+
+    if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code) {
+        app.start_search();
+        app.input_insert_char(c);
+        app.update_search_results();
     }
 }
 
@@ -199,53 +193,55 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
         }
         return;
     }
-    match (key.modifiers, key.code) {
-        (m, KeyCode::Char('d' | 'D')) if m.contains(KeyModifiers::ALT) => {
-            app.toggle_list_type();
-        }
-        (m, KeyCode::Char('n' | 'N')) if m.contains(KeyModifiers::ALT) => {
-            app.start_input(InputMode::AddingList, "");
-        }
-        (KeyModifiers::NONE, KeyCode::Enter) => {
-            if let Some(list) = app.current_list() {
-                let name = list.name.clone();
-                app.start_input(InputMode::RenamingList, &name);
+
+    let key_tuple = (key.modifiers, key.code);
+
+    if let Some(action) = app.key_config.normal_sidebar.get(&key_tuple) {
+        match action {
+            Action::ToggleListType => app.toggle_list_type(),
+            Action::AddList => app.start_input(InputMode::AddingList, ""),
+            Action::RenameList => {
+                if let Some(list) = app.current_list() {
+                    let name = list.name.clone();
+                    app.start_input(InputMode::RenamingList, &name);
+                }
             }
-        }
-        (_, KeyCode::Delete | KeyCode::Backspace) => {
-            if app.lists.len() > 1 {
-                app.input_mode = InputMode::ConfirmDelete;
+            Action::DeleteList => {
+                if app.lists.len() > 1 {
+                    app.input_mode = InputMode::ConfirmDelete;
+                }
             }
+            Action::MoveListUp => app.move_list_up(),
+            Action::MoveListDown => app.move_list_down(),
+            Action::MoveListToTop => app.move_list_to_top(),
+            Action::MoveListToBottom => app.move_list_to_bottom(),
+            _ => {}
         }
-        (KeyModifiers::SHIFT, KeyCode::Up) | (KeyModifiers::ALT, KeyCode::Up) => {
-            app.move_list_up();
-        }
-        (KeyModifiers::SHIFT, KeyCode::Down) | (KeyModifiers::ALT, KeyCode::Down) => {
-            app.move_list_down();
-        }
-        (m, KeyCode::Up) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            app.move_list_to_top();
-        }
-        (m, KeyCode::Down) if m == KeyModifiers::ALT | KeyModifiers::SUPER => {
-            app.move_list_to_bottom();
-        }
-        (KeyModifiers::NONE, KeyCode::Char(c)) => {
-            app.start_search();
-            app.input_insert_char(c);
-            app.update_search_results();
-        }
-        _ => {}
+        return;
+    }
+
+    if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code) {
+        app.start_search();
+        app.input_insert_char(c);
+        app.update_search_results();
     }
 }
 
 fn handle_search_mode(app: &mut App, key: KeyEvent) {
+    let key_tuple = (key.modifiers, key.code);
+
+    if let Some(action) = app.key_config.search.get(&key_tuple) {
+        match action {
+            Action::Confirm => app.select_search_result(),
+            Action::Cancel => app.cancel_input(),
+            Action::PrevResult => app.search_select_prev(),
+            Action::NextResult => app.search_select_next(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
-        KeyCode::Enter => {
-            app.select_search_result();
-        }
-        KeyCode::Esc => {
-            app.cancel_input();
-        }
         KeyCode::Backspace => {
             app.input_delete_char();
             if app.input_buffer.is_empty() {
@@ -254,18 +250,8 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
                 app.update_search_results();
             }
         }
-        KeyCode::Up => {
-            app.search_select_prev();
-        }
-        KeyCode::Down => {
-            app.search_select_next();
-        }
-        KeyCode::Left => {
-            app.input_move_cursor_left();
-        }
-        KeyCode::Right => {
-            app.input_move_cursor_right();
-        }
+        KeyCode::Left => app.input_move_cursor_left(),
+        KeyCode::Right => app.input_move_cursor_right(),
         KeyCode::Char(c) => {
             app.input_insert_char(c);
             app.update_search_results();
@@ -276,11 +262,21 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_input_mode(app: &mut App, key: KeyEvent) {
     if app.autocomplete_active {
-        match key.code {
-            KeyCode::Tab => {
-                app.accept_autocomplete();
-                return;
+        let key_tuple = (key.modifiers, key.code);
+        if let Some(action) = app.key_config.input.get(&key_tuple) {
+            match action {
+                Action::Autocomplete => {
+                    app.accept_autocomplete();
+                    return;
+                }
+                Action::Cancel => {
+                    app.dismiss_autocomplete();
+                    return;
+                }
+                _ => {}
             }
+        }
+        match key.code {
             KeyCode::Up => {
                 app.autocomplete_move_up();
                 return;
@@ -289,21 +285,21 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) {
                 app.autocomplete_move_down();
                 return;
             }
-            KeyCode::Esc => {
-                app.dismiss_autocomplete();
-                return;
-            }
             _ => {}
         }
     }
 
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.input.get(&key_tuple) {
+        match action {
+            Action::Confirm => app.confirm_input(),
+            Action::Cancel => app.cancel_input(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
-        KeyCode::Enter => {
-            app.confirm_input();
-        }
-        KeyCode::Esc => {
-            app.cancel_input();
-        }
         KeyCode::Backspace => {
             app.input_delete_char();
             app.update_autocomplete();
@@ -325,108 +321,96 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_focus_mode(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            app.stop_focus();
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.focus.get(&key_tuple) {
+        match action {
+            Action::Stop => app.stop_focus(),
+            Action::TogglePause => app.toggle_pause_focus(),
+            _ => {}
         }
-        KeyCode::Char(' ') => {
-            app.toggle_pause_focus();
-        }
-        _ => {}
     }
 }
 
 fn handle_filter_mode(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Enter => {
-            app.confirm_filter();
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.filter.get(&key_tuple) {
+        match action {
+            Action::Confirm => app.confirm_filter(),
+            Action::Cancel => app.cancel_filter(),
+            Action::Toggle => app.toggle_filter_tag(),
+            Action::MoveUp => app.filter_move_up(),
+            Action::MoveDown => app.filter_move_down(),
+            _ => {}
         }
-        KeyCode::Esc => {
-            app.cancel_filter();
-        }
-        KeyCode::Char(' ') => {
-            app.toggle_filter_tag();
-        }
-        KeyCode::Up => {
-            app.filter_move_up();
-        }
-        KeyCode::Down => {
-            app.filter_move_down();
-        }
-        _ => {}
     }
 }
 
 fn handle_move_to_list_mode(app: &mut App, key: KeyEvent) {
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.move_to_list.get(&key_tuple) {
+        match action {
+            Action::Confirm => app.confirm_move_to_list(),
+            Action::Cancel => app.cancel_move_to_list(),
+            Action::MoveUp => app.move_to_list_move_up(),
+            Action::MoveDown => app.move_to_list_move_down(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
-        KeyCode::Enter => {
-            app.confirm_move_to_list();
-        }
-        KeyCode::Esc => {
-            app.cancel_move_to_list();
-        }
-        KeyCode::Up => {
-            app.move_to_list_move_up();
-        }
-        KeyCode::Down => {
-            app.move_to_list_move_down();
-        }
-        KeyCode::Backspace => {
-            app.move_to_list_delete_char();
-        }
-        KeyCode::Char(c) => {
-            app.move_to_list_insert_char(c);
-        }
+        KeyCode::Backspace => app.move_to_list_delete_char(),
+        KeyCode::Char(c) => app.move_to_list_insert_char(c),
         _ => {}
     }
 }
 
 fn handle_context_mode(app: &mut App, key: KeyEvent) {
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.context_switch.get(&key_tuple) {
+        match action {
+            Action::Confirm => app.confirm_context_switch(),
+            Action::Cancel => app.cancel_context_switch(),
+            Action::MoveUp => app.context_move_up(),
+            Action::MoveDown => app.context_move_down(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
-        KeyCode::Enter => {
-            app.confirm_context_switch();
-        }
-        KeyCode::Esc => {
-            app.cancel_context_switch();
-        }
-        KeyCode::Up => {
-            app.context_move_up();
-        }
-        KeyCode::Down => {
-            app.context_move_down();
-        }
-        KeyCode::Backspace => {
-            app.context_delete_char();
-        }
-        KeyCode::Char(c) => {
-            app.context_insert_char(c);
-        }
+        KeyCode::Backspace => app.context_delete_char(),
+        KeyCode::Char(c) => app.context_insert_char(c),
         _ => {}
     }
 }
 
 fn handle_confirm_delete(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Char('y') => {
-            app.input_mode = InputMode::Normal;
-            app.delete_list();
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.confirm.get(&key_tuple) {
+        match action {
+            Action::Yes => {
+                app.input_mode = InputMode::Normal;
+                app.delete_list();
+            }
+            Action::No => {
+                app.input_mode = InputMode::Normal;
+            }
+            _ => {}
         }
-        KeyCode::Char('n') | KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-        }
-        _ => {}
     }
 }
 
 fn handle_confirm_archive(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Char('y') => {
-            app.archive_done_items();
+    let key_tuple = (key.modifiers, key.code);
+    if let Some(action) = app.key_config.confirm.get(&key_tuple) {
+        match action {
+            Action::Yes => app.archive_done_items(),
+            Action::No => {
+                app.input_mode = InputMode::Normal;
+            }
+            _ => {}
         }
-        KeyCode::Char('n') | KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-        }
-        _ => {}
     }
 }
 
@@ -1349,5 +1333,20 @@ mod tests {
         handle_key(&mut app, key);
 
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_tag_toggle_via_config() {
+        let mut app = sample_app();
+        app.key_config.normal_main.insert(
+            (KeyModifiers::ALT, KeyCode::Char('s')),
+            crate::config::Action::ToggleTag("starred".to_string()),
+        );
+        handle_key(&mut app, alt(KeyCode::Char('s')));
+        assert_eq!(app.lists[0].items[0].tags, vec!["code", "starred"]);
+
+        // Toggle off
+        handle_key(&mut app, alt(KeyCode::Char('s')));
+        assert_eq!(app.lists[0].items[0].tags, vec!["code"]);
     }
 }

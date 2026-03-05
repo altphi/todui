@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::config::KeyConfig;
 use crate::model::{
     AppSnapshot, InputMode, ListType, Pane, SearchResult, SidebarEntry, TodoItem, TodoList,
 };
@@ -42,10 +43,16 @@ pub struct App {
     pub current_context: String,
     pub context_cursor: usize,
     pub context_filter: String,
+    pub key_config: KeyConfig,
 }
 
 impl App {
-    pub fn new(data_dir: PathBuf, context: String, ascii_mode: bool) -> std::io::Result<Self> {
+    pub fn new(
+        data_dir: PathBuf,
+        context: String,
+        ascii_mode: bool,
+        key_config: KeyConfig,
+    ) -> std::io::Result<Self> {
         let context_dir = data_dir.join(&context);
         let lists = storage::load_lists(&context_dir)?;
         let mut app = Self {
@@ -83,6 +90,7 @@ impl App {
             current_context: context,
             context_cursor: 0,
             context_filter: String::new(),
+            key_config,
         };
         app.rebuild_sidebar_entries();
         Ok(app)
@@ -125,6 +133,7 @@ impl App {
             current_context: "test".into(),
             context_cursor: 0,
             context_filter: String::new(),
+            key_config: KeyConfig::default(),
         };
         app.rebuild_sidebar_entries();
         app
@@ -476,6 +485,20 @@ impl App {
             self.push_undo();
             self.lists[li].items[ii].done = !self.lists[li].items[ii].done;
             self.save_list_at(li);
+        }
+    }
+
+    pub fn toggle_tag(&mut self, tag: &str) {
+        if let Some((li, ii)) = self.resolve_selected_item() {
+            self.push_undo();
+            let tags = &mut self.lists[li].items[ii].tags;
+            if let Some(pos) = tags.iter().position(|t| t == tag) {
+                tags.remove(pos);
+            } else {
+                tags.push(tag.to_string());
+            }
+            self.save_list_at(li);
+            self.rebuild_sidebar_entries();
         }
     }
 
@@ -939,6 +962,8 @@ impl App {
             self.lists
                 .swap(self.selected_list_index, self.selected_list_index - 1);
             self.selected_list_index -= 1;
+            self.selected_sidebar_index = self.selected_list_index;
+            self.rebuild_sidebar_entries();
             self.save_order();
         }
     }
@@ -949,6 +974,8 @@ impl App {
             self.lists
                 .swap(self.selected_list_index, self.selected_list_index + 1);
             self.selected_list_index += 1;
+            self.selected_sidebar_index = self.selected_list_index;
+            self.rebuild_sidebar_entries();
             self.save_order();
         }
     }
@@ -959,6 +986,8 @@ impl App {
             let list = self.lists.remove(self.selected_list_index);
             self.lists.insert(0, list);
             self.selected_list_index = 0;
+            self.selected_sidebar_index = 0;
+            self.rebuild_sidebar_entries();
             self.save_order();
         }
     }
@@ -969,6 +998,8 @@ impl App {
             let list = self.lists.remove(self.selected_list_index);
             self.lists.push(list);
             self.selected_list_index = self.lists.len() - 1;
+            self.selected_sidebar_index = self.selected_list_index;
+            self.rebuild_sidebar_entries();
             self.save_order();
         }
     }
@@ -1605,15 +1636,18 @@ mod tests {
         ]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 1;
+        app.selected_sidebar_index = 1;
 
         app.move_list_up();
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
+        assert_eq!(app.selected_sidebar_index, 0);
 
         app.move_list_up();
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.selected_list_index, 0);
+        assert_eq!(app.selected_sidebar_index, 0);
     }
 
     #[test]
@@ -1625,15 +1659,18 @@ mod tests {
         ]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 1;
+        app.selected_sidebar_index = 1;
 
         app.move_list_down();
         assert_eq!(app.lists[1].name, "Gamma");
         assert_eq!(app.lists[2].name, "Beta");
         assert_eq!(app.selected_list_index, 2);
+        assert_eq!(app.selected_sidebar_index, 2);
 
         app.move_list_down();
         assert_eq!(app.lists[2].name, "Beta");
         assert_eq!(app.selected_list_index, 2);
+        assert_eq!(app.selected_sidebar_index, 2);
     }
 
     #[test]
@@ -1767,12 +1804,14 @@ mod tests {
         ]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 2;
+        app.selected_sidebar_index = 2;
 
         app.move_list_to_top();
         assert_eq!(app.lists[0].name, "Gamma");
         assert_eq!(app.lists[1].name, "Alpha");
         assert_eq!(app.lists[2].name, "Beta");
         assert_eq!(app.selected_list_index, 0);
+        assert_eq!(app.selected_sidebar_index, 0);
     }
 
     #[test]
@@ -1784,12 +1823,14 @@ mod tests {
         ]);
         app.active_pane = Pane::Sidebar;
         app.selected_list_index = 0;
+        app.selected_sidebar_index = 0;
 
         app.move_list_to_bottom();
         assert_eq!(app.lists[0].name, "Beta");
         assert_eq!(app.lists[1].name, "Gamma");
         assert_eq!(app.lists[2].name, "Alpha");
         assert_eq!(app.selected_list_index, 2);
+        assert_eq!(app.selected_sidebar_index, 2);
     }
 
     #[test]
@@ -3483,5 +3524,65 @@ mod tests {
         let app = App::with_lists(vec![list]);
 
         assert_eq!(app.done_count(), 2);
+    }
+
+    #[test]
+    fn test_toggle_tag_adds_tag() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem::new("Task A"));
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.toggle_tag("focus");
+        assert_eq!(app.lists[0].items[0].tags, vec!["focus"]);
+    }
+
+    #[test]
+    fn test_toggle_tag_removes_tag() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem {
+                title: "Task A".into(),
+                done: false,
+                tags: vec!["focus".into()],
+                time_secs: 0,
+            });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.toggle_tag("focus");
+        assert!(app.lists[0].items[0].tags.is_empty());
+    }
+
+    #[test]
+    fn test_toggle_tag_preserves_other_tags() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem {
+                title: "Task A".into(),
+                done: false,
+                tags: vec!["code".into()],
+                time_secs: 0,
+            });
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.toggle_tag("focus");
+        assert_eq!(app.lists[0].items[0].tags, vec!["code", "focus"]);
+    }
+
+    #[test]
+    fn test_toggle_tag_supports_undo() {
+        let mut app = App::with_lists(vec![{
+            let mut list = TodoList::new("Work");
+            list.items.push(TodoItem::new("Task A"));
+            list
+        }]);
+        app.active_pane = Pane::Main;
+        app.toggle_tag("focus");
+        assert_eq!(app.lists[0].items[0].tags, vec!["focus"]);
+        app.undo();
+        assert!(app.lists[0].items[0].tags.is_empty());
     }
 }
