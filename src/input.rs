@@ -244,11 +244,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Backspace => {
             app.input_delete_char();
-            if app.input_buffer.is_empty() {
-                app.cancel_input();
-            } else {
-                app.update_search_results();
-            }
+            app.update_search_results();
         }
         KeyCode::Left => app.input_move_cursor_left(),
         KeyCode::Right => app.input_move_cursor_right(),
@@ -845,13 +841,13 @@ mod tests {
     }
 
     #[test]
-    fn test_search_backspace_to_empty_returns_to_normal() {
+    fn test_search_backspace_to_empty_stays_in_search() {
         let mut app = sample_app();
         handle_key(&mut app, key(KeyCode::Char('T')));
         assert_eq!(app.input_mode, InputMode::Searching);
 
         handle_key(&mut app, key(KeyCode::Backspace));
-        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.input_mode, InputMode::Searching);
         assert_eq!(app.input_buffer, "");
     }
 
