@@ -49,19 +49,22 @@ pub enum InputMode {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchResult {
     List(usize),
-    Item(usize, usize),
+    Item(String),
     Tag(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SidebarEntry {
     List(usize),
+    Unassigned,
     Tag(String),
 }
 
+use crate::crdt::CrdtDocument;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppSnapshot {
-    pub lists: Vec<TodoList>,
+    pub doc: CrdtDocument,
     pub selected_list_index: usize,
     pub selected_item_index: usize,
     pub selected_sidebar_index: usize,

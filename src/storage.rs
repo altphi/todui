@@ -185,19 +185,6 @@ pub fn save_list(dir: &Path, list: &TodoList) -> io::Result<()> {
     fs::write(path, serialize_list(list))
 }
 
-pub fn save_all(dir: &Path, lists: &[TodoList]) -> io::Result<()> {
-    for list in lists {
-        save_list(dir, list)?;
-    }
-    Ok(())
-}
-
-pub fn save_order(dir: &Path, lists: &[TodoList]) -> io::Result<()> {
-    let filenames: Vec<String> = lists.iter().map(|l| name_to_filename(&l.name)).collect();
-    let content = filenames.join("\n");
-    fs::write(dir.join(".order"), content)
-}
-
 fn load_order(dir: &Path) -> Vec<String> {
     let path = dir.join(".order");
     fs::read_to_string(path)
@@ -320,15 +307,6 @@ pub fn create_context_dir(dir: &Path, name: &str) -> io::Result<()> {
     fs::create_dir_all(&context_dir)?;
     let inbox = TodoList::new("Inbox");
     save_list(&context_dir, &inbox)?;
-    Ok(())
-}
-
-pub fn delete_list_file(dir: &Path, list_name: &str) -> io::Result<()> {
-    let filename = name_to_filename(list_name);
-    let path = dir.join(filename);
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
     Ok(())
 }
 
@@ -651,66 +629,6 @@ mod tests {
         assert_eq!(lists.len(), 1);
         assert_eq!(lists[0].name, "Inbox");
         assert!(dir.join("inbox.md").exists());
-    }
-
-    #[test]
-    fn test_save_and_load_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("todos");
-        fs::create_dir_all(&dir).unwrap();
-
-        let mut list_a = TodoList::new("Alpha");
-        list_a.items.push(TodoItem {
-            title: "Task A".to_string(),
-            done: false,
-            tags: vec!["tag1".to_string()],
-            time_secs: 0,
-        });
-        let mut list_b = TodoList::new("Beta");
-        list_b.items.push(TodoItem {
-            title: "Task B".to_string(),
-            done: true,
-            tags: vec![],
-            time_secs: 0,
-        });
-
-        save_all(&dir, &[list_a.clone(), list_b.clone()]).unwrap();
-        let loaded = load_lists(&dir).unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].name, "Alpha");
-        assert_eq!(loaded[1].name, "Beta");
-        assert_eq!(loaded[0], list_a);
-        assert_eq!(loaded[1], list_b);
-    }
-
-    #[test]
-    fn test_save_and_load_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("todos");
-        fs::create_dir_all(&dir).unwrap();
-
-        let list_a = TodoList::new("Alpha");
-        let list_b = TodoList::new("Beta");
-        let list_c = TodoList::new("Gamma");
-
-        save_all(&dir, &[list_a, list_b, list_c]).unwrap();
-
-        let loaded = load_lists(&dir).unwrap();
-        assert_eq!(loaded[0].name, "Alpha");
-        assert_eq!(loaded[1].name, "Beta");
-        assert_eq!(loaded[2].name, "Gamma");
-
-        let reordered = vec![
-            TodoList::new("Gamma"),
-            TodoList::new("Alpha"),
-            TodoList::new("Beta"),
-        ];
-        save_order(&dir, &reordered).unwrap();
-
-        let loaded = load_lists(&dir).unwrap();
-        assert_eq!(loaded[0].name, "Gamma");
-        assert_eq!(loaded[1].name, "Alpha");
-        assert_eq!(loaded[2].name, "Beta");
     }
 
     #[test]

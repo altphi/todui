@@ -2,14 +2,18 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use automerge::AutoCommit;
+
 use crate::config::KeyConfig;
-use crate::model::{
-    AppSnapshot, InputMode, ListType, Pane, SearchResult, SidebarEntry, TodoItem, TodoList,
-};
+use crate::crdt::{CrdtDocument, CrdtItem, CrdtList};
+#[cfg(test)]
+use crate::model::TodoList;
+use crate::model::{AppSnapshot, InputMode, Pane, SearchResult, SidebarEntry};
 use crate::storage;
 
 pub struct App {
-    pub lists: Vec<TodoList>,
+    auto_doc: AutoCommit,
+    pub doc: CrdtDocument,
     pub active_pane: Pane,
     pub selected_list_index: usize,
     pub selected_item_index: usize,
@@ -24,8 +28,7 @@ pub struct App {
     pub search_results: Vec<SearchResult>,
     pub search_selected: usize,
     pub ascii_mode: bool,
-    pub focus_list: usize,
-    pub focus_item: usize,
+    pub focus_item_id: Option<String>,
     pub focus_start: Option<Instant>,
     pub focus_accumulated: u64,
     pub filter_tags: Vec<String>,
@@ -35,7 +38,7 @@ pub struct App {
     pub autocomplete_suggestions: Vec<String>,
     pub autocomplete_cursor: usize,
     pub autocomplete_active: bool,
-    pub selected_items: HashSet<usize>,
+    pub selected_items: HashSet<String>,
     pub move_to_list_cursor: usize,
     pub move_to_list_filter: String,
     pub sidebar_entries: Vec<SidebarEntry>,
@@ -44,6 +47,7 @@ pub struct App {
     pub context_cursor: usize,
     pub context_filter: String,
     pub key_config: KeyConfig,
+    dirty: bool,
 }
 
 impl App {
@@ -54,9 +58,10 @@ impl App {
         key_config: KeyConfig,
     ) -> std::io::Result<Self> {
         let context_dir = data_dir.join(&context);
-        let lists = storage::load_lists(&context_dir)?;
+        let (auto_doc, doc) = crate::crdt::load_context_document(&context_dir)?;
         let mut app = Self {
-            lists,
+            auto_doc,
+            doc,
             active_pane: Pane::Sidebar,
             selected_list_index: 0,
             selected_item_index: 0,
@@ -71,8 +76,7 @@ impl App {
             search_results: Vec::new(),
             search_selected: 0,
             ascii_mode,
-            focus_list: 0,
-            focus_item: 0,
+            focus_item_id: None,
             focus_start: None,
             focus_accumulated: 0,
             filter_tags: Vec::new(),
@@ -91,6 +95,7 @@ impl App {
             context_cursor: 0,
             context_filter: String::new(),
             key_config,
+            dirty: false,
         };
         app.rebuild_sidebar_entries();
         Ok(app)
@@ -98,8 +103,10 @@ impl App {
 
     #[cfg(test)]
     pub fn with_lists(lists: Vec<TodoList>) -> Self {
+        let doc = crate::crdt::migrate_from_lists(&lists);
         let mut app = Self {
-            lists,
+            auto_doc: AutoCommit::new(),
+            doc,
             active_pane: Pane::Sidebar,
             selected_list_index: 0,
             selected_item_index: 0,
@@ -114,8 +121,7 @@ impl App {
             search_results: Vec::new(),
             search_selected: 0,
             ascii_mode: false,
-            focus_list: 0,
-            focus_item: 0,
+            focus_item_id: None,
             focus_start: None,
             focus_accumulated: 0,
             filter_tags: Vec::new(),
@@ -134,6 +140,7 @@ impl App {
             context_cursor: 0,
             context_filter: String::new(),
             key_config: KeyConfig::default(),
+            dirty: false,
         };
         app.rebuild_sidebar_entries();
         app
@@ -163,11 +170,23 @@ impl App {
     }
 
     pub fn switch_context(&mut self, name: &str) {
-        let _ = storage::save_all(&self.context_dir(), &self.lists);
-        let _ = storage::save_order(&self.context_dir(), &self.lists);
+        self.flush();
         self.current_context = name.to_string();
-        self.lists = storage::load_lists(&self.context_dir())
-            .unwrap_or_else(|_| vec![TodoList::new("Inbox")]);
+        let (auto_doc, doc) = crate::crdt::load_context_document(&self.context_dir())
+            .unwrap_or_else(|_| {
+                let mut doc = crate::crdt::CrdtDocument::default();
+                let inbox = crate::crdt::CrdtList {
+                    id: crate::crdt::new_id(),
+                    name: "Inbox".to_string(),
+                    list_type: "normal".to_string(),
+                    last_reset: None,
+                    position: 0.0,
+                };
+                doc.lists.insert(inbox.id.clone(), inbox);
+                (AutoCommit::new(), doc)
+            });
+        self.auto_doc = auto_doc;
+        self.doc = doc;
         self.selected_list_index = 0;
         self.selected_item_index = 0;
         self.selected_sidebar_index = 0;
@@ -234,7 +253,7 @@ impl App {
 
     fn snapshot(&self) -> AppSnapshot {
         AppSnapshot {
-            lists: self.lists.clone(),
+            doc: self.doc.clone(),
             selected_list_index: self.selected_list_index,
             selected_item_index: self.selected_item_index,
             selected_sidebar_index: self.selected_sidebar_index,
@@ -247,7 +266,7 @@ impl App {
     }
 
     fn restore_snapshot(&mut self, snap: AppSnapshot) {
-        self.lists = snap.lists;
+        self.doc = snap.doc;
         self.selected_list_index = snap.selected_list_index;
         self.selected_item_index = snap.selected_item_index;
         self.selected_sidebar_index = snap.selected_sidebar_index;
@@ -270,33 +289,128 @@ impl App {
         }
     }
 
-    pub fn current_list(&self) -> Option<&TodoList> {
-        self.lists.get(self.selected_list_index)
+    pub fn selected_list_id(&self) -> Option<String> {
+        self.doc
+            .ordered_lists()
+            .get(self.selected_list_index)
+            .map(|l| l.id.clone())
     }
 
-    pub fn current_list_mut(&mut self) -> Option<&mut TodoList> {
-        self.lists.get_mut(self.selected_list_index)
+    pub fn current_list(&self) -> Option<&CrdtList> {
+        let lists = self.doc.ordered_lists();
+        lists.get(self.selected_list_index).copied()
     }
 
-    /// Returns (real_index, &item) pairs, sorted with incomplete items first.
-    /// Respects show_done and filter_tags settings.
-    pub fn visible_items(&self) -> Vec<(usize, &TodoItem)> {
-        self.current_list()
-            .map(|list| {
-                let mut items: Vec<(usize, &TodoItem)> = list
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| self.show_done || !item.done)
-                    .filter(|(_, item)| {
-                        self.filter_tags.is_empty()
-                            || item.tags.iter().any(|t| self.filter_tags.contains(t))
-                    })
-                    .collect();
-                items.sort_by_key(|(_, item)| item.done);
-                items
-            })
-            .unwrap_or_default()
+    pub fn visible_items(&self) -> Vec<(&str, &CrdtItem)> {
+        let list_id = match self.selected_list_id() {
+            Some(id) => id,
+            None => return vec![],
+        };
+        let items = self.doc.items_for_list(&list_id);
+        let mut undone: Vec<(&str, &CrdtItem)> = Vec::new();
+        let mut done: Vec<(&str, &CrdtItem)> = Vec::new();
+        for item in items {
+            if !self.filter_tags.is_empty()
+                && !self.filter_tags.iter().any(|ft| item.tags.contains(ft))
+            {
+                continue;
+            }
+            if item.done {
+                if self.show_done {
+                    done.push((item.id.as_str(), item));
+                }
+            } else {
+                undone.push((item.id.as_str(), item));
+            }
+        }
+        undone.extend(done);
+        undone
+    }
+
+    pub fn tag_visible_items(&self) -> Vec<(&str, &CrdtItem)> {
+        let tag = match self.selected_tag_name() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let items = self.doc.items_for_tag(tag);
+        let mut undone: Vec<(&str, &CrdtItem)> = Vec::new();
+        let mut done: Vec<(&str, &CrdtItem)> = Vec::new();
+        for item in items {
+            if item.done {
+                if self.show_done {
+                    done.push((item.id.as_str(), item));
+                }
+            } else {
+                undone.push((item.id.as_str(), item));
+            }
+        }
+        undone.extend(done);
+        undone
+    }
+
+    pub fn unassigned_visible_items(&self) -> Vec<(&str, &CrdtItem)> {
+        let items = self.doc.unassigned_items();
+        let mut undone: Vec<(&str, &CrdtItem)> = Vec::new();
+        let mut done: Vec<(&str, &CrdtItem)> = Vec::new();
+        for item in items {
+            if item.done {
+                if self.show_done {
+                    done.push((item.id.as_str(), item));
+                }
+            } else {
+                undone.push((item.id.as_str(), item));
+            }
+        }
+        undone.extend(done);
+        undone
+    }
+
+    pub fn resolve_selected_item(&self) -> Option<String> {
+        if self.is_tag_view() {
+            self.tag_visible_items()
+                .get(self.selected_item_index)
+                .map(|(id, _)| id.to_string())
+        } else if self.is_unassigned_view() {
+            self.unassigned_visible_items()
+                .get(self.selected_item_index)
+                .map(|(id, _)| id.to_string())
+        } else {
+            self.visible_items()
+                .get(self.selected_item_index)
+                .map(|(id, _)| id.to_string())
+        }
+    }
+
+    #[cfg(test)]
+    pub fn items_for_nth_list(&self, n: usize) -> Vec<&CrdtItem> {
+        if let Some(list) = self.doc.ordered_lists().get(n) {
+            self.doc.items_for_list(&list.id)
+        } else {
+            vec![]
+        }
+    }
+
+    #[cfg(test)]
+    pub fn nth_list(&self, n: usize) -> Option<&CrdtList> {
+        self.doc.ordered_lists().get(n).copied()
+    }
+
+    #[cfg(test)]
+    pub fn num_lists(&self) -> usize {
+        self.doc.ordered_lists().len()
+    }
+
+    #[cfg(test)]
+    pub fn item_id_in_list(&self, list_n: usize, item_n: usize) -> String {
+        self.items_for_nth_list(list_n)[item_n].id.clone()
+    }
+
+    #[cfg(test)]
+    pub fn set_item_field(&mut self, list_n: usize, item_n: usize, f: impl FnOnce(&mut CrdtItem)) {
+        let id = self.item_id_in_list(list_n, item_n);
+        if let Some(item) = self.doc.items.get_mut(&id) {
+            f(item);
+        }
     }
 
     fn sync_sidebar_selection(&mut self) {
@@ -304,7 +418,7 @@ impl App {
             Some(SidebarEntry::List(i)) => {
                 self.selected_list_index = *i;
             }
-            Some(SidebarEntry::Tag(_)) | None => {}
+            Some(SidebarEntry::Tag(_)) | Some(SidebarEntry::Unassigned) | None => {}
         }
         self.selected_item_index = 0;
         self.filter_tags.clear();
@@ -448,6 +562,7 @@ impl App {
         if let Some(SidebarEntry::List(i)) = self.sidebar_entries.get(self.selected_sidebar_index) {
             self.selected_list_index = *i;
         }
+        let num_lists = self.doc.ordered_lists().len();
         if self.is_tag_view() {
             let tag_items = self.tag_visible_items();
             if tag_items.is_empty() {
@@ -455,14 +570,21 @@ impl App {
             } else if self.selected_item_index >= tag_items.len() {
                 self.selected_item_index = tag_items.len() - 1;
             }
+        } else if self.is_unassigned_view() {
+            let items = self.unassigned_visible_items();
+            if items.is_empty() {
+                self.selected_item_index = 0;
+            } else if self.selected_item_index >= items.len() {
+                self.selected_item_index = items.len() - 1;
+            }
         } else {
-            if self.lists.is_empty() {
+            if num_lists == 0 {
                 self.selected_list_index = 0;
                 self.selected_item_index = 0;
                 return;
             }
-            if self.selected_list_index >= self.lists.len() {
-                self.selected_list_index = self.lists.len() - 1;
+            if self.selected_list_index >= num_lists {
+                self.selected_list_index = num_lists - 1;
             }
             let visible = self.visible_items();
             if visible.is_empty() {
@@ -473,168 +595,204 @@ impl App {
         }
     }
 
-    fn selected_real_index(&self) -> Option<usize> {
-        let visible = self.visible_items();
-        visible
-            .get(self.selected_item_index)
-            .map(|(real_idx, _)| *real_idx)
-    }
-
     pub fn toggle_done(&mut self) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
-            self.lists[li].items[ii].done = !self.lists[li].items[ii].done;
-            self.save_list_at(li);
+            if let Some(item) = self.doc.items.get_mut(&id) {
+                item.done = !item.done;
+            }
+            self.save_doc();
         }
     }
 
     pub fn toggle_tag(&mut self, tag: &str) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
-            let tags = &mut self.lists[li].items[ii].tags;
-            if let Some(pos) = tags.iter().position(|t| t == tag) {
-                tags.remove(pos);
-            } else {
-                tags.push(tag.to_string());
+            if let Some(item) = self.doc.items.get_mut(&id) {
+                if let Some(pos) = item.tags.iter().position(|t| t == tag) {
+                    item.tags.remove(pos);
+                } else {
+                    item.tags.push(tag.to_string());
+                }
             }
-            self.save_list_at(li);
             self.rebuild_sidebar_entries();
+            self.save_doc();
         }
     }
 
     pub fn delete_todo(&mut self) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
-            self.lists[li].items.remove(ii);
-            self.rebuild_sidebar_entries();
+            self.doc.items.remove(&id);
             self.clamp_selection();
-            self.save_list_at(li);
+            self.rebuild_sidebar_entries();
+            self.save_doc();
         }
     }
 
     pub fn add_todo(&mut self, title: String) {
-        if self.is_tag_view() {
-            return;
-        }
         if title.trim().is_empty() {
             return;
         }
         self.push_undo();
-        let (clean_title, tags) = storage::extract_tags_pub(&title);
-        let item = TodoItem {
+        let (clean_title, mut tags) = storage::extract_tags_pub(&title);
+        if let Some(tag) = self.selected_tag_name()
+            && !tags.contains(&tag.to_string())
+        {
+            tags.push(tag.to_string());
+        }
+        let list_id = if self.is_tag_view() || self.is_unassigned_view() {
+            None
+        } else {
+            self.selected_list_id()
+        };
+        let position = match &list_id {
+            Some(lid) => {
+                if let Some(sel_id) = self.resolve_selected_item() {
+                    if let Some(sel_item) = self.doc.items.get(&sel_id) {
+                        sel_item.position - 0.5
+                    } else {
+                        self.doc.next_position_for_list(lid)
+                    }
+                } else {
+                    self.doc.next_position_for_list(lid)
+                }
+            }
+            None => {
+                if let Some(sel_id) = self.resolve_selected_item() {
+                    if let Some(sel_item) = self.doc.items.get(&sel_id) {
+                        sel_item.position - 0.5
+                    } else {
+                        self.doc.next_position_unassigned()
+                    }
+                } else {
+                    self.doc.next_position_unassigned()
+                }
+            }
+        };
+        let item = CrdtItem {
+            id: crate::crdt::new_id(),
             title: clean_title,
             done: false,
             tags,
             time_secs: 0,
+            list_id,
+            position,
         };
-        let insert_idx = self.selected_real_index();
-        if let Some(list) = self.current_list_mut() {
-            match insert_idx {
-                Some(idx) => list.items.insert(idx, item),
-                None => list.items.push(item),
-            }
-        }
+        self.doc.items.insert(item.id.clone(), item);
         self.rebuild_sidebar_entries();
-        self.save_current_list();
+        self.save_doc();
     }
 
     pub fn edit_todo_title(&mut self, new_title: String) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
-            self.lists[li].items[ii].title = new_title;
-            self.save_list_at(li);
+            if let Some(item) = self.doc.items.get_mut(&id) {
+                item.title = new_title;
+            }
+            self.save_doc();
         }
     }
 
     pub fn edit_todo_tags(&mut self, tags_str: String) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
             let tags: Vec<String> = tags_str
                 .split_whitespace()
                 .map(|t| t.strip_prefix('@').unwrap_or(t).to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            self.lists[li].items[ii].tags = tags;
+            if let Some(item) = self.doc.items.get_mut(&id) {
+                item.tags = tags;
+            }
             self.rebuild_sidebar_entries();
-            self.save_list_at(li);
+            self.save_doc();
         }
     }
 
     pub fn move_todo_up(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
         let visible = self.visible_items();
         let vi = self.selected_item_index;
-        if vi > 0 {
-            let real_idx = visible[vi].0;
-            let prev_real_idx = visible[vi - 1].0;
+        if vi > 0 && vi < visible.len() {
+            let cur_id = visible[vi].0.to_string();
+            let prev_id = visible[vi - 1].0.to_string();
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items.swap(real_idx, prev_real_idx);
-            }
+            let cur_pos = self.doc.items[&cur_id].position;
+            let prev_pos = self.doc.items[&prev_id].position;
+            self.doc.items.get_mut(&cur_id).unwrap().position = prev_pos;
+            self.doc.items.get_mut(&prev_id).unwrap().position = cur_pos;
             self.selected_item_index -= 1;
-            self.save_current_list();
+            self.save_doc();
         }
     }
 
     pub fn move_todo_down(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
         let visible = self.visible_items();
         let vi = self.selected_item_index;
         if vi + 1 < visible.len() {
-            let real_idx = visible[vi].0;
-            let next_real_idx = visible[vi + 1].0;
+            let cur_id = visible[vi].0.to_string();
+            let next_id = visible[vi + 1].0.to_string();
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                list.items.swap(real_idx, next_real_idx);
-            }
+            let cur_pos = self.doc.items[&cur_id].position;
+            let next_pos = self.doc.items[&next_id].position;
+            self.doc.items.get_mut(&cur_id).unwrap().position = next_pos;
+            self.doc.items.get_mut(&next_id).unwrap().position = cur_pos;
             self.selected_item_index += 1;
-            self.save_current_list();
+            self.save_doc();
         }
     }
 
     pub fn move_todo_to_top(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
-        if let Some(real_idx) = self.selected_real_index()
-            && real_idx > 0
-        {
+        let visible = self.visible_items();
+        let vi = self.selected_item_index;
+        if vi > 0 && vi < visible.len() {
+            let cur_id = visible[vi].0.to_string();
+            let min_pos = visible
+                .iter()
+                .map(|(_, item)| item.position)
+                .fold(f64::INFINITY, f64::min);
+            drop(visible);
             self.push_undo();
-            if let Some(list) = self.current_list_mut() {
-                let item = list.items.remove(real_idx);
-                list.items.insert(0, item);
-            }
-            let visible = self.visible_items();
-            if let Some(vi) = visible.iter().position(|(ri, _)| *ri == 0) {
-                self.selected_item_index = vi;
-            }
-            self.save_current_list();
+            self.doc.items.get_mut(&cur_id).unwrap().position = min_pos - 1.0;
+            self.selected_item_index = 0;
+            self.save_doc();
         }
     }
 
     pub fn move_todo_to_bottom(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
-        if let Some(real_idx) = self.selected_real_index() {
-            let len = self.current_list().map_or(0, |l| l.items.len());
-            if real_idx + 1 < len {
-                self.push_undo();
-                if let Some(list) = self.current_list_mut() {
-                    let item = list.items.remove(real_idx);
-                    list.items.push(item);
-                }
-                let new_real_idx = self.current_list().map_or(0, |l| l.items.len()) - 1;
-                let visible = self.visible_items();
-                if let Some(vi) = visible.iter().position(|(ri, _)| *ri == new_real_idx) {
-                    self.selected_item_index = vi;
-                }
-                self.save_current_list();
+        let visible = self.visible_items();
+        let vi = self.selected_item_index;
+        if vi < visible.len() {
+            let undone_count = visible.iter().filter(|(_, item)| !item.done).count();
+            if vi + 1 >= undone_count {
+                return;
             }
+            let cur_id = visible[vi].0.to_string();
+            let max_pos = visible
+                .iter()
+                .filter(|(_, item)| !item.done)
+                .map(|(_, item)| item.position)
+                .fold(f64::NEG_INFINITY, f64::max);
+            drop(visible);
+            self.push_undo();
+            self.doc.items.get_mut(&cur_id).unwrap().position = max_pos + 1.0;
+            let new_visible = self.visible_items();
+            if let Some(new_vi) = new_visible.iter().position(|(id, _)| *id == cur_id) {
+                self.selected_item_index = new_vi;
+            }
+            self.save_doc();
         }
     }
 
@@ -645,9 +803,8 @@ impl App {
     }
 
     pub fn start_focus(&mut self) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
-            self.focus_list = li;
-            self.focus_item = ii;
+        if let Some(id) = self.resolve_selected_item() {
+            self.focus_item_id = Some(id);
             self.focus_accumulated = 0;
             self.focus_start = Some(Instant::now());
             self.input_mode = InputMode::Focused;
@@ -656,11 +813,15 @@ impl App {
 
     pub fn stop_focus(&mut self) {
         let elapsed = self.focus_elapsed_secs();
-        self.lists[self.focus_list].items[self.focus_item].time_secs += elapsed;
+        if let Some(ref id) = self.focus_item_id
+            && let Some(item) = self.doc.items.get_mut(id)
+        {
+            item.time_secs += elapsed;
+        }
         self.focus_start = None;
         self.focus_accumulated = 0;
         self.input_mode = InputMode::Normal;
-        self.save_current_list();
+        self.save_doc();
     }
 
     pub fn toggle_pause_focus(&mut self) {
@@ -678,10 +839,12 @@ impl App {
     }
 
     pub fn set_item_time(&mut self, secs: u64) {
-        if let Some((li, ii)) = self.resolve_selected_item() {
+        if let Some(id) = self.resolve_selected_item() {
             self.push_undo();
-            self.lists[li].items[ii].time_secs = secs;
-            self.save_list_at(li);
+            if let Some(item) = self.doc.items.get_mut(&id) {
+                item.time_secs = secs;
+            }
+            self.save_doc();
         }
     }
 
@@ -690,8 +853,8 @@ impl App {
             return;
         }
         let mut tags: Vec<String> = Vec::new();
-        if let Some(list) = self.current_list() {
-            for item in &list.items {
+        if let Some(list_id) = self.selected_list_id() {
+            for item in self.doc.items_for_list(&list_id) {
                 for tag in &item.tags {
                     if !tags.contains(tag) {
                         tags.push(tag.clone());
@@ -757,24 +920,17 @@ impl App {
     }
 
     pub fn collect_all_tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = Vec::new();
-        for list in &self.lists {
-            for item in &list.items {
-                for tag in &item.tags {
-                    if !tags.contains(tag) {
-                        tags.push(tag.clone());
-                    }
-                }
-            }
-        }
-        tags.sort();
-        tags
+        self.doc.all_tags()
     }
 
     pub fn rebuild_sidebar_entries(&mut self) {
         self.sidebar_entries.clear();
-        for i in 0..self.lists.len() {
+        let lists = self.doc.ordered_lists();
+        for i in 0..lists.len() {
             self.sidebar_entries.push(SidebarEntry::List(i));
+        }
+        if self.doc.items.values().any(|i| i.list_id.is_none()) {
+            self.sidebar_entries.push(SidebarEntry::Unassigned);
         }
         let tags = self.collect_all_tags();
         for tag in tags {
@@ -795,46 +951,21 @@ impl App {
         matches!(self.selected_sidebar_entry(), Some(SidebarEntry::Tag(_)))
     }
 
+    pub fn is_unassigned_view(&self) -> bool {
+        matches!(
+            self.selected_sidebar_entry(),
+            Some(SidebarEntry::Unassigned)
+        )
+    }
+
+    pub fn is_virtual_view(&self) -> bool {
+        self.is_tag_view() || self.is_unassigned_view()
+    }
+
     pub fn selected_tag_name(&self) -> Option<&str> {
         match self.selected_sidebar_entry() {
             Some(SidebarEntry::Tag(name)) => Some(name),
             _ => None,
-        }
-    }
-
-    pub fn tag_visible_items(&self) -> Vec<(usize, usize)> {
-        let tag = match self.selected_tag_name() {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        let mut undone: Vec<(usize, usize)> = Vec::new();
-        let mut done: Vec<(usize, usize)> = Vec::new();
-        for (li, list) in self.lists.iter().enumerate() {
-            for (ii, item) in list.items.iter().enumerate() {
-                if !item.tags.iter().any(|t| t == tag) {
-                    continue;
-                }
-                if item.done {
-                    if self.show_done {
-                        done.push((li, ii));
-                    }
-                } else {
-                    undone.push((li, ii));
-                }
-            }
-        }
-        undone.extend(done);
-        undone
-    }
-
-    pub fn resolve_selected_item(&self) -> Option<(usize, usize)> {
-        if self.is_tag_view() {
-            self.tag_visible_items()
-                .get(self.selected_item_index)
-                .copied()
-        } else {
-            self.selected_real_index()
-                .map(|ri| (self.selected_list_index, ri))
         }
     }
 
@@ -918,89 +1049,119 @@ impl App {
             return;
         }
         self.push_undo();
-        let list = TodoList::new(name);
-        self.lists.push(list);
-        self.rebuild_sidebar_entries();
-        self.selected_list_index = self.lists.len() - 1;
+        let list = CrdtList {
+            id: crate::crdt::new_id(),
+            name,
+            list_type: "normal".to_string(),
+            last_reset: None,
+            position: self.doc.next_list_position(),
+        };
+        self.doc.lists.insert(list.id.clone(), list);
+        self.selected_list_index = self.doc.ordered_lists().len() - 1;
         self.selected_item_index = 0;
-        self.save_current_list();
-        self.save_order();
+        self.rebuild_sidebar_entries();
+        self.save_doc();
     }
 
     pub fn rename_list(&mut self, new_name: String) {
         if new_name.trim().is_empty() {
             return;
         }
-        if let Some(list) = self.current_list() {
-            let old_name = list.name.clone();
+        if let Some(list_id) = self.selected_list_id() {
             self.push_undo();
-            let _ = storage::delete_list_file(&self.context_dir(), &old_name);
-            if let Some(list) = self.current_list_mut() {
+            if let Some(list) = self.doc.lists.get_mut(&list_id) {
                 list.name = new_name;
             }
-            self.save_current_list();
-            self.save_order();
+            self.save_doc();
         }
     }
 
     pub fn delete_list(&mut self) {
-        if self.lists.len() <= 1 {
+        let num_lists = self.doc.ordered_lists().len();
+        if num_lists <= 1 {
             return;
         }
-        self.push_undo();
-        let list_name = self.lists[self.selected_list_index].name.clone();
-        let _ = storage::delete_list_file(&self.context_dir(), &list_name);
-        self.lists.remove(self.selected_list_index);
-        self.rebuild_sidebar_entries();
-        self.clamp_selection();
-        self.save_order();
+        if let Some(list_id) = self.selected_list_id() {
+            self.push_undo();
+            for item in self.doc.items.values_mut() {
+                if item.list_id.as_deref() == Some(&list_id) {
+                    item.list_id = None;
+                }
+            }
+            self.doc.lists.remove(&list_id);
+            self.rebuild_sidebar_entries();
+            self.clamp_selection();
+            self.save_doc();
+        }
     }
 
     pub fn move_list_up(&mut self) {
-        if self.selected_list_index > 0 {
+        let lists = self.doc.ordered_lists();
+        if self.selected_list_index > 0 && self.selected_list_index < lists.len() {
+            let cur_id = lists[self.selected_list_index].id.clone();
+            let prev_id = lists[self.selected_list_index - 1].id.clone();
             self.push_undo();
-            self.lists
-                .swap(self.selected_list_index, self.selected_list_index - 1);
+            let cur_pos = self.doc.lists[&cur_id].position;
+            let prev_pos = self.doc.lists[&prev_id].position;
+            self.doc.lists.get_mut(&cur_id).unwrap().position = prev_pos;
+            self.doc.lists.get_mut(&prev_id).unwrap().position = cur_pos;
             self.selected_list_index -= 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_order();
+            self.save_doc();
         }
     }
 
     pub fn move_list_down(&mut self) {
-        if self.selected_list_index + 1 < self.lists.len() {
+        let lists = self.doc.ordered_lists();
+        if self.selected_list_index + 1 < lists.len() {
+            let cur_id = lists[self.selected_list_index].id.clone();
+            let next_id = lists[self.selected_list_index + 1].id.clone();
             self.push_undo();
-            self.lists
-                .swap(self.selected_list_index, self.selected_list_index + 1);
+            let cur_pos = self.doc.lists[&cur_id].position;
+            let next_pos = self.doc.lists[&next_id].position;
+            self.doc.lists.get_mut(&cur_id).unwrap().position = next_pos;
+            self.doc.lists.get_mut(&next_id).unwrap().position = cur_pos;
             self.selected_list_index += 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_order();
+            self.save_doc();
         }
     }
 
     pub fn move_list_to_top(&mut self) {
-        if self.selected_list_index > 0 {
+        let lists = self.doc.ordered_lists();
+        if self.selected_list_index > 0 && self.selected_list_index < lists.len() {
+            let cur_id = lists[self.selected_list_index].id.clone();
+            let min_pos = lists
+                .iter()
+                .map(|l| l.position)
+                .fold(f64::INFINITY, f64::min);
+            drop(lists);
             self.push_undo();
-            let list = self.lists.remove(self.selected_list_index);
-            self.lists.insert(0, list);
+            self.doc.lists.get_mut(&cur_id).unwrap().position = min_pos - 1.0;
             self.selected_list_index = 0;
             self.selected_sidebar_index = 0;
             self.rebuild_sidebar_entries();
-            self.save_order();
+            self.save_doc();
         }
     }
 
     pub fn move_list_to_bottom(&mut self) {
-        if self.selected_list_index + 1 < self.lists.len() {
+        let lists = self.doc.ordered_lists();
+        if self.selected_list_index + 1 < lists.len() {
+            let cur_id = lists[self.selected_list_index].id.clone();
+            let max_pos = lists
+                .iter()
+                .map(|l| l.position)
+                .fold(f64::NEG_INFINITY, f64::max);
+            drop(lists);
             self.push_undo();
-            let list = self.lists.remove(self.selected_list_index);
-            self.lists.push(list);
-            self.selected_list_index = self.lists.len() - 1;
+            self.doc.lists.get_mut(&cur_id).unwrap().position = max_pos + 1.0;
+            self.selected_list_index = self.doc.ordered_lists().len() - 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_order();
+            self.save_doc();
         }
     }
 
@@ -1105,17 +1266,18 @@ impl App {
         let mut tag_item_matches = Vec::new();
         let mut title_matches = Vec::new();
 
-        for (li, list) in self.lists.iter().enumerate() {
+        let ordered_lists = self.doc.ordered_lists();
+        for (li, list) in ordered_lists.iter().enumerate() {
             if list.name.to_lowercase().contains(&query) {
                 list_matches.push(SearchResult::List(li));
             }
-            for (ii, item) in list.items.iter().enumerate() {
+            for item in self.doc.items_for_list(&list.id) {
                 let title_match = item.title.to_lowercase().contains(&query);
                 let tag_match = item.tags.iter().any(|t| t.to_lowercase().contains(&query));
                 if tag_match && !title_match {
-                    tag_item_matches.push(SearchResult::Item(li, ii));
+                    tag_item_matches.push(SearchResult::Item(item.id.clone()));
                 } else if title_match {
-                    title_matches.push(SearchResult::Item(li, ii));
+                    title_matches.push(SearchResult::Item(item.id.clone()));
                 }
             }
         }
@@ -1160,18 +1322,25 @@ impl App {
                     self.selected_item_index = 0;
                     self.active_pane = Pane::Main;
                 }
-                SearchResult::Item(li, ii) => {
-                    self.selected_list_index = li;
-                    self.selected_sidebar_index = li;
-                    self.active_pane = Pane::Main;
-
-                    if self.lists[li].items[ii].done {
-                        self.show_done = true;
-                    }
-
-                    let visible = self.visible_items();
-                    if let Some(vi) = visible.iter().position(|(real_idx, _)| *real_idx == ii) {
-                        self.selected_item_index = vi;
+                SearchResult::Item(ref item_id) => {
+                    if let Some(item) = self.doc.items.get(item_id) {
+                        if item.done {
+                            self.show_done = true;
+                        }
+                        if let Some(ref list_id) = item.list_id {
+                            let lists = self.doc.ordered_lists();
+                            if let Some(li) = lists.iter().position(|l| l.id == *list_id) {
+                                self.selected_list_index = li;
+                                self.selected_sidebar_index = li;
+                                self.active_pane = Pane::Main;
+                                let visible = self.visible_items();
+                                if let Some(vi) =
+                                    visible.iter().position(|(id, _)| *id == item_id.as_str())
+                                {
+                                    self.selected_item_index = vi;
+                                }
+                            }
+                        }
                     }
                 }
                 SearchResult::Tag(ref name) => {
@@ -1196,13 +1365,13 @@ impl App {
     }
 
     pub fn toggle_select_current(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
-        if let Some(real_idx) = self.selected_real_index()
-            && !self.selected_items.remove(&real_idx)
+        if let Some(id) = self.resolve_selected_item()
+            && !self.selected_items.remove(&id)
         {
-            self.selected_items.insert(real_idx);
+            self.selected_items.insert(id);
         }
     }
 
@@ -1216,17 +1385,13 @@ impl App {
             return;
         }
         self.push_undo();
-        let mut indices: Vec<usize> = self.selected_items.iter().copied().collect();
-        indices.sort_unstable_by(|a, b| b.cmp(a));
-        if let Some(list) = self.current_list_mut() {
-            for idx in indices {
-                list.items.remove(idx);
-            }
+        let ids: Vec<String> = self.selected_items.drain().collect();
+        for id in ids {
+            self.doc.items.remove(&id);
         }
-        self.selected_items.clear();
         self.rebuild_sidebar_entries();
         self.clamp_selection();
-        self.save_current_list();
+        self.save_doc();
     }
 
     pub fn toggle_done_selected(&mut self) {
@@ -1235,22 +1400,27 @@ impl App {
             return;
         }
         self.push_undo();
-        let indices: Vec<usize> = self.selected_items.iter().copied().collect();
-        if let Some(list) = self.current_list_mut() {
-            for idx in indices {
-                list.items[idx].done = !list.items[idx].done;
+        let ids: Vec<String> = self.selected_items.drain().collect();
+        for id in &ids {
+            if let Some(item) = self.doc.items.get_mut(id) {
+                item.done = !item.done;
             }
         }
-        self.selected_items.clear();
         self.rebuild_sidebar_entries();
         self.clamp_selection();
-        self.save_current_list();
+        self.save_doc();
     }
 
     pub fn done_count(&self) -> usize {
-        self.current_list()
-            .map(|list| list.items.iter().filter(|item| item.done).count())
-            .unwrap_or(0)
+        if let Some(list_id) = self.selected_list_id() {
+            self.doc
+                .items_for_list(&list_id)
+                .iter()
+                .filter(|item| item.done)
+                .count()
+        } else {
+            0
+        }
     }
 
     pub fn start_archive(&mut self) {
@@ -1261,34 +1431,52 @@ impl App {
     }
 
     pub fn archive_done_items(&mut self) {
-        let Some(list) = self.current_list() else {
-            return;
+        let list_id = match self.selected_list_id() {
+            Some(id) => id,
+            None => return,
         };
-        let done_items: Vec<_> = list
-            .items
+        let list_name = match self.doc.lists.get(&list_id) {
+            Some(l) => l.name.clone(),
+            None => return,
+        };
+        let done_items: Vec<crate::model::TodoItem> = self
+            .doc
+            .items_for_list(&list_id)
             .iter()
             .filter(|item| item.done)
-            .cloned()
+            .map(|item| crate::model::TodoItem {
+                title: item.title.clone(),
+                done: item.done,
+                tags: item.tags.clone(),
+                time_secs: item.time_secs,
+            })
             .collect();
         if done_items.is_empty() {
             return;
         }
-        let list_name = list.name.clone();
         self.push_undo();
         let _ = storage::append_to_archive(&self.context_dir(), &list_name, &done_items);
-        if let Some(list) = self.current_list_mut() {
-            list.items.retain(|item| !item.done);
+        let ids_to_remove: Vec<String> = self
+            .doc
+            .items
+            .values()
+            .filter(|item| item.list_id.as_deref() == Some(&list_id) && item.done)
+            .map(|item| item.id.clone())
+            .collect();
+        for id in ids_to_remove {
+            self.doc.items.remove(&id);
         }
         self.selected_items.clear();
         self.rebuild_sidebar_entries();
         self.clamp_selection();
-        self.save_current_list();
+        self.save_doc();
         self.input_mode = InputMode::Normal;
     }
 
     pub fn move_to_list_targets(&self) -> Vec<(usize, &str)> {
         let query = self.move_to_list_filter.to_lowercase();
-        self.lists
+        self.doc
+            .ordered_lists()
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != self.selected_list_index)
@@ -1298,14 +1486,15 @@ impl App {
     }
 
     pub fn start_move_to_list(&mut self) {
-        if self.is_tag_view() {
+        if self.is_virtual_view() {
             return;
         }
-        if self.lists.len() < 2 {
+        let num_lists = self.doc.ordered_lists().len();
+        if num_lists < 2 {
             return;
         }
         let has_items = if self.selected_items.is_empty() {
-            self.selected_real_index().is_some()
+            self.resolve_selected_item().is_some()
         } else {
             true
         };
@@ -1336,31 +1525,38 @@ impl App {
             return;
         }
         let target_list_idx = targets[self.move_to_list_cursor].0;
+        let target_list_id = self
+            .doc
+            .ordered_lists()
+            .get(target_list_idx)
+            .map(|l| l.id.clone());
+        let target_list_id = match target_list_id {
+            Some(id) => id,
+            None => return,
+        };
 
         self.push_undo();
 
-        let indices_to_move: Vec<usize> = if self.selected_items.is_empty() {
-            self.selected_real_index().into_iter().collect()
+        let mut ids_to_move: Vec<String> = if self.selected_items.is_empty() {
+            self.resolve_selected_item().into_iter().collect()
         } else {
-            let mut v: Vec<usize> = self.selected_items.iter().copied().collect();
-            v.sort_unstable();
-            v
+            self.selected_items.iter().cloned().collect()
         };
+        ids_to_move.sort_by(|a, b| {
+            let pos_a = self.doc.items.get(a).map(|i| i.position).unwrap_or(0.0);
+            let pos_b = self.doc.items.get(b).map(|i| i.position).unwrap_or(0.0);
+            pos_a
+                .partial_cmp(&pos_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(b))
+        });
 
-        let mut items_to_move: Vec<_> = indices_to_move
-            .iter()
-            .map(|&idx| self.lists[self.selected_list_index].items[idx].clone())
-            .collect();
-
-        // Remove from source in reverse order
-        for &idx in indices_to_move.iter().rev() {
-            self.lists[self.selected_list_index].items.remove(idx);
-        }
-
-        // Insert at top of target, preserving order
-        items_to_move.reverse();
-        for item in items_to_move {
-            self.lists[target_list_idx].items.insert(0, item);
+        let min_pos = self.doc.next_position_for_list(&target_list_id);
+        for (offset, id) in ids_to_move.iter().enumerate() {
+            if let Some(item) = self.doc.items.get_mut(id) {
+                item.list_id = Some(target_list_id.clone());
+                item.position = min_pos + offset as f64;
+            }
         }
 
         self.selected_items.clear();
@@ -1368,9 +1564,7 @@ impl App {
         self.input_mode = InputMode::Normal;
         self.rebuild_sidebar_entries();
         self.clamp_selection();
-
-        self.save_current_list();
-        let _ = storage::save_list(&self.context_dir(), &self.lists[target_list_idx]);
+        self.save_doc();
     }
 
     pub fn move_to_list_insert_char(&mut self, c: char) {
@@ -1388,86 +1582,92 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
-    fn save_current_list(&self) {
-        if let Some(list) = self.current_list() {
-            let _ = storage::save_list(&self.context_dir(), list);
-        }
+    fn save_doc(&mut self) {
+        self.dirty = true;
     }
 
-    fn save_list_at(&self, index: usize) {
-        if let Some(list) = self.lists.get(index) {
-            let _ = storage::save_list(&self.context_dir(), list);
-        }
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
-    fn save_order(&self) {
-        let _ = storage::save_order(&self.context_dir(), &self.lists);
+    pub fn flush(&mut self) {
+        if self.dirty {
+            let _ = crate::crdt::save_context_document(
+                &self.context_dir(),
+                &mut self.auto_doc,
+                &self.doc,
+            );
+            self.dirty = false;
+        }
     }
 
     pub fn toggle_list_type(&mut self) {
-        if let Some(list) = self.current_list() {
-            let _ = list;
+        if let Some(list_id) = self.selected_list_id() {
             self.push_undo();
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            if let Some(list) = self.current_list_mut() {
-                match list.list_type {
-                    ListType::Normal => {
-                        list.list_type = ListType::Daily;
-                        list.last_reset = Some(today);
-                    }
-                    ListType::Daily => {
-                        list.list_type = ListType::Normal;
-                        list.last_reset = None;
-                    }
+            if let Some(list) = self.doc.lists.get_mut(&list_id) {
+                if list.list_type == "normal" {
+                    list.list_type = "daily".to_string();
+                    list.last_reset = Some(today);
+                } else {
+                    list.list_type = "normal".to_string();
+                    list.last_reset = None;
                 }
             }
-            self.save_current_list();
+            self.save_doc();
         }
     }
 
     pub fn reset_daily_lists(&mut self) {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        for i in 0..self.lists.len() {
-            if self.lists[i].list_type != ListType::Daily {
-                continue;
-            }
-            let needs_reset = match &self.lists[i].last_reset {
+        let list_ids: Vec<String> = self
+            .doc
+            .lists
+            .values()
+            .filter(|l| l.list_type == "daily")
+            .map(|l| l.id.clone())
+            .collect();
+        for list_id in list_ids {
+            let needs_reset = match &self.doc.lists[&list_id].last_reset {
                 None => true,
                 Some(date) => date.as_str() < today.as_str(),
             };
             if !needs_reset {
                 continue;
             }
-            let done_indices: Vec<usize> = self.lists[i]
+            let mut done_items: Vec<(String, f64)> = self
+                .doc
                 .items
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| item.done)
-                .map(|(idx, _)| idx)
+                .values()
+                .filter(|item| item.list_id.as_deref() == Some(&list_id) && item.done)
+                .map(|item| (item.id.clone(), item.position))
                 .collect();
-            if done_indices.is_empty() {
-                self.lists[i].last_reset = Some(today.clone());
-                let _ = storage::save_list(&self.context_dir(), &self.lists[i]);
+            done_items.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let done_item_ids: Vec<String> = done_items.into_iter().map(|(id, _)| id).collect();
+            if done_item_ids.is_empty() {
+                self.doc.lists.get_mut(&list_id).unwrap().last_reset = Some(today.clone());
                 continue;
             }
-            let mut reset_items: Vec<TodoItem> = Vec::new();
-            for &idx in &done_indices {
-                self.lists[i].items[idx].done = false;
-                self.lists[i].items[idx].time_secs = 0;
-                reset_items.push(self.lists[i].items[idx].clone());
+            let max_pos = self.doc.next_position_for_list(&list_id);
+            for (offset, item_id) in done_item_ids.iter().enumerate() {
+                if let Some(item) = self.doc.items.get_mut(item_id) {
+                    item.done = false;
+                    item.time_secs = 0;
+                    item.position = max_pos + offset as f64;
+                }
             }
-            for &idx in done_indices.iter().rev() {
-                self.lists[i].items.remove(idx);
-            }
-            self.lists[i].items.extend(reset_items);
-            self.lists[i].last_reset = Some(today.clone());
-            let _ = storage::save_list(&self.data_dir, &self.lists[i]);
+            self.doc.lists.get_mut(&list_id).unwrap().last_reset = Some(today.clone());
         }
         self.rebuild_sidebar_entries();
+        self.save_doc();
     }
 
     pub fn quit(&mut self) {
-        let _ = storage::save_all(&self.context_dir(), &self.lists);
+        self.flush();
         self.running = false;
     }
 }
@@ -1475,6 +1675,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{ListType, TodoItem};
 
     fn sample_app() -> App {
         let mut work = TodoList::new("Work");
@@ -1572,35 +1773,35 @@ mod tests {
     #[test]
     fn test_toggle_done() {
         let mut app = sample_app();
-        assert!(!app.lists[0].items[0].done);
+        assert!(!app.items_for_nth_list(0)[0].done);
 
         app.toggle_done();
-        assert!(app.lists[0].items[0].done);
+        assert!(app.items_for_nth_list(0)[0].done);
 
         // After toggling, sort order changes so selected_item_index=0 now maps to Task C
         app.toggle_done();
-        assert!(app.lists[0].items[2].done);
+        assert!(app.items_for_nth_list(0)[2].done);
     }
 
     #[test]
     fn test_delete_todo() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
 
         app.delete_todo();
-        assert_eq!(app.lists[0].items.len(), 2);
-        assert_eq!(app.lists[0].items[0].title, "Task B");
-        assert_eq!(app.lists[0].items[1].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "Task C");
     }
 
     #[test]
     fn test_add_todo() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
 
         app.add_todo("New task @urgent @work".to_string());
-        assert_eq!(app.lists[0].items.len(), 4);
-        let added = &app.lists[0].items[0];
+        assert_eq!(app.items_for_nth_list(0).len(), 4);
+        let added = &app.items_for_nth_list(0)[0];
         assert_eq!(added.title, "New task");
         assert_eq!(added.tags, vec!["urgent", "work"]);
         assert!(!added.done);
@@ -1614,16 +1815,16 @@ mod tests {
 
         app.move_todo_up();
         // C swapped with A (visible neighbor), not B (real neighbor)
-        assert_eq!(app.lists[0].items[0].title, "Task C");
-        assert_eq!(app.lists[0].items[1].title, "Task B");
-        assert_eq!(app.lists[0].items[2].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "Task A");
         assert_eq!(app.selected_item_index, 0);
 
         app.move_todo_down();
         // C swapped back with A
-        assert_eq!(app.lists[0].items[0].title, "Task A");
-        assert_eq!(app.lists[0].items[1].title, "Task B");
-        assert_eq!(app.lists[0].items[2].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "Task C");
         assert_eq!(app.selected_item_index, 1);
     }
 
@@ -1639,13 +1840,13 @@ mod tests {
         app.selected_sidebar_index = 1;
 
         app.move_list_up();
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
         assert_eq!(app.selected_sidebar_index, 0);
 
         app.move_list_up();
-        assert_eq!(app.lists[0].name, "Beta");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
         assert_eq!(app.selected_list_index, 0);
         assert_eq!(app.selected_sidebar_index, 0);
     }
@@ -1662,13 +1863,13 @@ mod tests {
         app.selected_sidebar_index = 1;
 
         app.move_list_down();
-        assert_eq!(app.lists[1].name, "Gamma");
-        assert_eq!(app.lists[2].name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Gamma");
+        assert_eq!(app.nth_list(2).unwrap().name, "Beta");
         assert_eq!(app.selected_list_index, 2);
         assert_eq!(app.selected_sidebar_index, 2);
 
         app.move_list_down();
-        assert_eq!(app.lists[2].name, "Beta");
+        assert_eq!(app.nth_list(2).unwrap().name, "Beta");
         assert_eq!(app.selected_list_index, 2);
         assert_eq!(app.selected_sidebar_index, 2);
     }
@@ -1701,9 +1902,9 @@ mod tests {
         app.selected_item_index = 2;
 
         app.move_todo_to_top();
-        assert_eq!(app.lists[0].items[0].title, "C");
-        assert_eq!(app.lists[0].items[1].title, "A");
-        assert_eq!(app.lists[0].items[2].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "C");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "B");
         assert_eq!(app.selected_item_index, 0);
     }
 
@@ -1729,8 +1930,8 @@ mod tests {
         app.selected_item_index = 0;
 
         app.move_todo_to_top();
-        assert_eq!(app.lists[0].items[0].title, "A");
-        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "B");
         assert_eq!(app.selected_item_index, 0);
     }
 
@@ -1762,9 +1963,9 @@ mod tests {
         app.selected_item_index = 0;
 
         app.move_todo_to_bottom();
-        assert_eq!(app.lists[0].items[0].title, "B");
-        assert_eq!(app.lists[0].items[1].title, "C");
-        assert_eq!(app.lists[0].items[2].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "C");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "A");
         assert_eq!(app.selected_item_index, 2);
     }
 
@@ -1790,8 +1991,8 @@ mod tests {
         app.selected_item_index = 1;
 
         app.move_todo_to_bottom();
-        assert_eq!(app.lists[0].items[0].title, "A");
-        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "B");
         assert_eq!(app.selected_item_index, 1);
     }
 
@@ -1807,9 +2008,9 @@ mod tests {
         app.selected_sidebar_index = 2;
 
         app.move_list_to_top();
-        assert_eq!(app.lists[0].name, "Gamma");
-        assert_eq!(app.lists[1].name, "Alpha");
-        assert_eq!(app.lists[2].name, "Beta");
+        assert_eq!(app.nth_list(0).unwrap().name, "Gamma");
+        assert_eq!(app.nth_list(1).unwrap().name, "Alpha");
+        assert_eq!(app.nth_list(2).unwrap().name, "Beta");
         assert_eq!(app.selected_list_index, 0);
         assert_eq!(app.selected_sidebar_index, 0);
     }
@@ -1826,9 +2027,9 @@ mod tests {
         app.selected_sidebar_index = 0;
 
         app.move_list_to_bottom();
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Gamma");
-        assert_eq!(app.lists[2].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Gamma");
+        assert_eq!(app.nth_list(2).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 2);
         assert_eq!(app.selected_sidebar_index, 2);
     }
@@ -1880,11 +2081,11 @@ mod tests {
     #[test]
     fn test_add_list() {
         let mut app = sample_app();
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
 
         app.add_list("Shopping".to_string());
-        assert_eq!(app.lists.len(), 3);
-        assert_eq!(app.lists[2].name, "Shopping");
+        assert_eq!(app.num_lists(), 3);
+        assert_eq!(app.nth_list(2).unwrap().name, "Shopping");
         assert_eq!(app.selected_list_index, 2);
         assert_eq!(app.selected_item_index, 0);
     }
@@ -1892,38 +2093,38 @@ mod tests {
     #[test]
     fn test_delete_list() {
         let mut app = sample_app();
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
 
         app.delete_list();
-        assert_eq!(app.lists.len(), 1);
-        assert_eq!(app.lists[0].name, "Personal");
+        assert_eq!(app.num_lists(), 1);
+        assert_eq!(app.nth_list(0).unwrap().name, "Personal");
     }
 
     #[test]
     fn test_delete_last_list_prevented() {
         let mut app = App::with_lists(vec![TodoList::new("Only")]);
-        assert_eq!(app.lists.len(), 1);
+        assert_eq!(app.num_lists(), 1);
 
         app.delete_list();
-        assert_eq!(app.lists.len(), 1);
-        assert_eq!(app.lists[0].name, "Only");
+        assert_eq!(app.num_lists(), 1);
+        assert_eq!(app.nth_list(0).unwrap().name, "Only");
     }
 
     #[test]
     fn test_undo_redo() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
 
         app.delete_todo();
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
 
         app.undo();
-        assert_eq!(app.lists[0].items.len(), 3);
-        assert_eq!(app.lists[0].items[0].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task A");
 
         app.redo();
-        assert_eq!(app.lists[0].items.len(), 2);
-        assert_eq!(app.lists[0].items[0].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task B");
     }
 
     #[test]
@@ -1931,10 +2132,10 @@ mod tests {
         let mut app = sample_app();
 
         app.delete_todo();
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
 
         app.undo();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
         assert!(!app.redo_stack.is_empty());
 
         app.add_todo("Brand new".to_string());
@@ -2053,8 +2254,8 @@ mod tests {
         app.input_buffer = "Task".to_string();
         app.update_search_results();
         assert_eq!(app.search_results.len(), 2);
-        assert_eq!(app.search_results[0], SearchResult::Item(0, 0));
-        assert_eq!(app.search_results[1], SearchResult::Item(0, 1));
+        assert!(matches!(&app.search_results[0], SearchResult::Item(_)));
+        assert!(matches!(&app.search_results[1], SearchResult::Item(_)));
     }
 
     #[test]
@@ -2065,7 +2266,7 @@ mod tests {
         app.update_search_results();
         assert_eq!(app.search_results.len(), 2);
         assert_eq!(app.search_results[0], SearchResult::Tag("urgent".into()));
-        assert_eq!(app.search_results[1], SearchResult::Item(0, 1));
+        assert!(matches!(&app.search_results[1], SearchResult::Item(_)));
     }
 
     #[test]
@@ -2148,7 +2349,7 @@ mod tests {
         app.input_buffer = "groceries".to_string();
         app.update_search_results();
         assert_eq!(app.search_results.len(), 1);
-        assert_eq!(app.search_results[0], SearchResult::Item(1, 0));
+        assert!(matches!(&app.search_results[0], SearchResult::Item(_)));
 
         app.select_search_result();
         assert_eq!(app.selected_list_index, 1);
@@ -2164,7 +2365,7 @@ mod tests {
         app.start_search();
         app.input_buffer = "Task B".to_string();
         app.update_search_results();
-        assert_eq!(app.search_results[0], SearchResult::Item(0, 1));
+        assert!(matches!(&app.search_results[0], SearchResult::Item(_)));
         app.select_search_result();
         assert!(app.show_done);
         assert_eq!(app.selected_list_index, 0);
@@ -2189,7 +2390,7 @@ mod tests {
         app.focus_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
         app.stop_focus();
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.lists[0].items[0].time_secs >= 9);
+        assert!(app.items_for_nth_list(0)[0].time_secs >= 9);
     }
 
     #[test]
@@ -2210,20 +2411,20 @@ mod tests {
     fn test_edit_time() {
         let mut app = sample_app();
         app.selected_item_index = 0;
-        app.lists[0].items[0].time_secs = 3600;
+        app.set_item_field(0, 0, |item| item.time_secs = 3600);
         app.set_item_time(5400);
-        assert_eq!(app.lists[0].items[0].time_secs, 5400);
+        assert_eq!(app.items_for_nth_list(0)[0].time_secs, 5400);
     }
 
     #[test]
     fn test_edit_time_clear() {
         let mut app = sample_app();
         app.selected_item_index = 0;
-        app.lists[0].items[0].time_secs = 3600;
+        app.set_item_field(0, 0, |item| item.time_secs = 3600);
         app.input_mode = InputMode::EditingTime;
         app.input_buffer.clear();
         app.confirm_input();
-        assert_eq!(app.lists[0].items[0].time_secs, 0);
+        assert_eq!(app.items_for_nth_list(0)[0].time_secs, 0);
     }
 
     #[test]
@@ -2626,7 +2827,7 @@ mod tests {
         let mut app = sample_app();
         app.selected_item_index = 0;
         app.toggle_select_current();
-        assert!(app.selected_items.contains(&0)); // real index of Task A
+        assert_eq!(app.selected_items.len(), 1);
         app.toggle_select_current();
         assert!(app.selected_items.is_empty());
     }
@@ -2634,13 +2835,14 @@ mod tests {
     #[test]
     fn test_delete_selected_multiple() {
         let mut app = sample_app();
-        // Visible order: Task A (real 0), Task C (real 2), Task B (real 1, done)
-        // Select real indices 0 and 2
-        app.selected_items.insert(0);
-        app.selected_items.insert(2);
+        // Visible order: Task A, Task C, Task B (done)
+        let id_a = app.visible_items()[0].0.to_string();
+        let id_c = app.visible_items()[1].0.to_string();
+        app.selected_items.insert(id_a);
+        app.selected_items.insert(id_c);
         app.delete_selected();
-        assert_eq!(app.lists[0].items.len(), 1);
-        assert_eq!(app.lists[0].items[0].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0).len(), 1);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task B");
         assert!(app.selected_items.is_empty());
     }
 
@@ -2649,25 +2851,28 @@ mod tests {
         let mut app = sample_app();
         assert!(app.selected_items.is_empty());
         app.delete_selected();
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
     }
 
     #[test]
     fn test_toggle_done_selected_multiple() {
         let mut app = sample_app();
-        // Task A (real 0) not done, Task C (real 2) not done
-        app.selected_items.insert(0);
-        app.selected_items.insert(2);
+        // Visible: Task A (not done), Task C (not done), Task B (done)
+        let id_a = app.visible_items()[0].0.to_string();
+        let id_c = app.visible_items()[1].0.to_string();
+        app.selected_items.insert(id_a.clone());
+        app.selected_items.insert(id_c.clone());
         app.toggle_done_selected();
-        assert!(app.lists[0].items[0].done);
-        assert!(app.lists[0].items[2].done);
+        assert!(app.doc.items[&id_a].done);
+        assert!(app.doc.items[&id_c].done);
         assert!(app.selected_items.is_empty());
     }
 
     #[test]
     fn test_selection_cleared_on_pane_switch() {
         let mut app = sample_app();
-        app.selected_items.insert(0);
+        let id = app.visible_items()[0].0.to_string();
+        app.selected_items.insert(id);
         app.toggle_pane();
         assert!(app.selected_items.is_empty());
     }
@@ -2676,7 +2881,8 @@ mod tests {
     fn test_selection_cleared_on_list_change() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        app.selected_items.insert(0);
+        let id = app.visible_items()[0].0.to_string();
+        app.selected_items.insert(id);
         app.move_selection_down();
         assert!(app.selected_items.is_empty());
     }
@@ -2685,7 +2891,8 @@ mod tests {
     fn test_selection_cleared_on_undo() {
         let mut app = sample_app();
         app.delete_todo();
-        app.selected_items.insert(0);
+        let id = app.visible_items()[0].0.to_string();
+        app.selected_items.insert(id);
         app.undo();
         assert!(app.selected_items.is_empty());
     }
@@ -2727,24 +2934,26 @@ mod tests {
         app.selected_item_index = 0; // Task A
         app.start_move_to_list();
         app.confirm_move_to_list();
-        assert_eq!(app.lists[0].items.len(), 2);
-        assert_eq!(app.lists[1].items.len(), 1);
-        assert_eq!(app.lists[1].items[0].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
+        assert_eq!(app.items_for_nth_list(1).len(), 1);
+        assert_eq!(app.items_for_nth_list(1)[0].title, "Task A");
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
     #[test]
     fn test_confirm_move_multi_selected() {
         let mut app = sample_app();
-        app.selected_items.insert(0); // Task A
-        app.selected_items.insert(2); // Task C
+        let id_a = app.visible_items()[0].0.to_string(); // Task A
+        let id_c = app.visible_items()[1].0.to_string(); // Task C
+        app.selected_items.insert(id_a);
+        app.selected_items.insert(id_c);
         app.start_move_to_list();
         app.confirm_move_to_list();
-        assert_eq!(app.lists[0].items.len(), 1);
-        assert_eq!(app.lists[0].items[0].title, "Task B");
-        assert_eq!(app.lists[1].items.len(), 2);
-        assert_eq!(app.lists[1].items[0].title, "Task A");
-        assert_eq!(app.lists[1].items[1].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0).len(), 1);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task B");
+        assert_eq!(app.items_for_nth_list(1).len(), 2);
+        assert_eq!(app.items_for_nth_list(1)[0].title, "Task A");
+        assert_eq!(app.items_for_nth_list(1)[1].title, "Task C");
         assert!(app.selected_items.is_empty());
     }
 
@@ -2754,11 +2963,11 @@ mod tests {
         app.selected_item_index = 0;
         app.start_move_to_list();
         app.confirm_move_to_list();
-        assert_eq!(app.lists[0].items.len(), 2);
-        assert_eq!(app.lists[1].items.len(), 1);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
+        assert_eq!(app.items_for_nth_list(1).len(), 1);
         app.undo();
-        assert_eq!(app.lists[0].items.len(), 3);
-        assert_eq!(app.lists[1].items.len(), 0);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
+        assert_eq!(app.items_for_nth_list(1).len(), 0);
     }
 
     #[test]
@@ -2768,7 +2977,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::MovingToList);
         app.cancel_move_to_list();
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
     }
 
     #[test]
@@ -2844,15 +3053,15 @@ mod tests {
     fn test_toggle_list_type() {
         let mut app = App::with_lists(vec![TodoList::new("Habits")]);
         app.active_pane = Pane::Sidebar;
-        assert_eq!(app.lists[0].list_type, ListType::Normal);
+        assert_eq!(app.nth_list(0).unwrap().list_type, "normal");
 
         app.toggle_list_type();
-        assert_eq!(app.lists[0].list_type, ListType::Daily);
-        assert!(app.lists[0].last_reset.is_some());
+        assert_eq!(app.nth_list(0).unwrap().list_type, "daily");
+        assert!(app.nth_list(0).unwrap().last_reset.is_some());
 
         app.toggle_list_type();
-        assert_eq!(app.lists[0].list_type, ListType::Normal);
-        assert_eq!(app.lists[0].last_reset, None);
+        assert_eq!(app.nth_list(0).unwrap().list_type, "normal");
+        assert_eq!(app.nth_list(0).unwrap().last_reset, None);
     }
 
     #[test]
@@ -2872,17 +3081,17 @@ mod tests {
         let mut app = App::with_lists(vec![list]);
         app.reset_daily_lists();
 
-        assert!(!app.lists[0].items[0].done);
-        assert!(!app.lists[0].items[1].done);
-        assert!(!app.lists[0].items[2].done);
+        assert!(!app.items_for_nth_list(0)[0].done);
+        assert!(!app.items_for_nth_list(0)[1].done);
+        assert!(!app.items_for_nth_list(0)[2].done);
         // A stays at top, B and C moved to bottom
-        assert_eq!(app.lists[0].items[0].title, "A");
-        assert_eq!(app.lists[0].items[1].title, "B");
-        assert_eq!(app.lists[0].items[2].title, "C");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "C");
         // A (not done) keeps its timer, B and C (were done) get cleared
-        assert_eq!(app.lists[0].items[0].time_secs, 300);
-        assert_eq!(app.lists[0].items[1].time_secs, 0);
-        assert_eq!(app.lists[0].items[2].time_secs, 0);
+        assert_eq!(app.items_for_nth_list(0)[0].time_secs, 300);
+        assert_eq!(app.items_for_nth_list(0)[1].time_secs, 0);
+        assert_eq!(app.items_for_nth_list(0)[2].time_secs, 0);
     }
 
     #[test]
@@ -2897,7 +3106,7 @@ mod tests {
         let mut app = App::with_lists(vec![list]);
         app.reset_daily_lists();
 
-        assert!(app.lists[0].items[0].done);
+        assert!(app.items_for_nth_list(0)[0].done);
     }
 
     #[test]
@@ -2910,7 +3119,7 @@ mod tests {
         let mut app = App::with_lists(vec![list]);
         app.reset_daily_lists();
 
-        assert!(app.lists[0].items[0].done);
+        assert!(app.items_for_nth_list(0)[0].done);
     }
 
     #[test]
@@ -2931,13 +3140,13 @@ mod tests {
         app.reset_daily_lists();
 
         // Not-done items stay in place, done items (B, D) move to end in order
-        assert_eq!(app.lists[0].items[0].title, "A");
-        assert_eq!(app.lists[0].items[1].title, "C");
-        assert_eq!(app.lists[0].items[2].title, "E");
-        assert_eq!(app.lists[0].items[3].title, "B");
-        assert_eq!(app.lists[0].items[4].title, "D");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "C");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "E");
+        assert_eq!(app.items_for_nth_list(0)[3].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[4].title, "D");
         // All should be not done
-        for item in &app.lists[0].items {
+        for item in app.items_for_nth_list(0) {
             assert!(!item.done);
         }
     }
@@ -3103,8 +3312,8 @@ mod tests {
         app.selected_sidebar_index = 2; // Tag("urgent")
         let items = app.tag_visible_items();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0], (0, 0)); // Work/A (not done)
-        assert_eq!(items[1], (1, 0)); // Personal/C (done)
+        assert_eq!(items[0].1.title, "A"); // Work/A (not done)
+        assert_eq!(items[1].1.title, "C"); // Personal/C (done)
     }
 
     #[test]
@@ -3128,7 +3337,7 @@ mod tests {
         app.show_done = false;
         let items = app.tag_visible_items();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0], (0, 0));
+        assert_eq!(items[0].1.title, "A");
     }
 
     #[test]
@@ -3137,7 +3346,7 @@ mod tests {
         app.active_pane = Pane::Main;
         app.selected_item_index = 0;
         let loc = app.resolve_selected_item();
-        assert_eq!(loc, Some((0, 0)));
+        assert!(loc.is_some());
     }
 
     #[test]
@@ -3158,9 +3367,17 @@ mod tests {
         });
         let mut app = App::with_lists(vec![work, personal]);
         app.selected_sidebar_index = 2; // Tag("code")
-        app.selected_item_index = 1; // second item in tag view
+        // Find B's index in the tag view
+        let tag_items = app.tag_visible_items();
+        let b_index = tag_items
+            .iter()
+            .position(|(_, item)| item.title == "B")
+            .unwrap();
+        app.selected_item_index = b_index;
         let loc = app.resolve_selected_item();
-        assert_eq!(loc, Some((1, 0))); // Personal, item 0
+        assert!(loc.is_some());
+        let id = loc.unwrap();
+        assert_eq!(app.doc.items.get(&id).unwrap().title, "B");
     }
 
     #[test]
@@ -3247,9 +3464,19 @@ mod tests {
         let mut app = App::with_lists(vec![work, personal]);
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 2; // Tag("urgent")
-        app.selected_item_index = 1; // Personal/B
+        app.selected_item_index = 0; // first item in tag view
+        let tag_items = app.tag_visible_items();
+        let first_title = tag_items[0].1.title.clone();
+        drop(tag_items);
         app.toggle_done();
-        assert!(app.lists[1].items[0].done);
+        // The toggled item should now be done
+        let item = app
+            .doc
+            .items
+            .values()
+            .find(|i| i.title == first_title)
+            .unwrap();
+        assert!(item.done);
     }
 
     #[test]
@@ -3269,16 +3496,16 @@ mod tests {
             time_secs: 0,
         });
         let mut app = App::with_lists(vec![work, personal]);
+        assert_eq!(app.doc.items.len(), 2);
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 2;
-        app.selected_item_index = 0; // Work/A
+        app.selected_item_index = 0;
         app.delete_todo();
-        assert_eq!(app.lists[0].items.len(), 0);
-        assert_eq!(app.lists[1].items.len(), 1);
+        assert_eq!(app.doc.items.len(), 1);
     }
 
     #[test]
-    fn test_add_todo_disabled_in_tag_view() {
+    fn test_add_todo_in_tag_view() {
         let mut work = TodoList::new("Work");
         work.items.push(TodoItem {
             title: "A".into(),
@@ -3289,7 +3516,79 @@ mod tests {
         let mut app = App::with_lists(vec![work]);
         app.selected_sidebar_index = 1; // Tag("code")
         app.add_todo("New item".into());
-        assert_eq!(app.lists[0].items.len(), 1); // unchanged
+        let unassigned: Vec<_> = app
+            .doc
+            .items
+            .values()
+            .filter(|i| i.list_id.is_none())
+            .collect();
+        assert_eq!(unassigned.len(), 1);
+        assert_eq!(unassigned[0].title, "New item");
+        assert!(unassigned[0].tags.contains(&"code".to_string()));
+    }
+
+    #[test]
+    fn test_add_todo_in_tag_view_auto_tags() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec!["urgent".into()],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        app.selected_sidebar_index = 1; // Tag("urgent")
+        app.add_todo("Fix bug @code".into());
+        let unassigned: Vec<_> = app
+            .doc
+            .items
+            .values()
+            .filter(|i| i.list_id.is_none())
+            .collect();
+        assert_eq!(unassigned.len(), 1);
+        assert_eq!(unassigned[0].title, "Fix bug");
+        assert!(unassigned[0].tags.contains(&"code".to_string()));
+        assert!(unassigned[0].tags.contains(&"urgent".to_string()));
+    }
+
+    #[test]
+    fn test_add_todo_in_unassigned_view() {
+        let mut work = TodoList::new("Work");
+        work.items.push(TodoItem {
+            title: "A".into(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![work]);
+        // Add an unassigned item to create the Unassigned sidebar entry
+        let item = CrdtItem {
+            id: crate::crdt::new_id(),
+            title: "Existing unassigned".into(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+            list_id: None,
+            position: 0.0,
+        };
+        app.doc.items.insert(item.id.clone(), item);
+        app.rebuild_sidebar_entries();
+        // Navigate to Unassigned entry (after the list)
+        let unassigned_idx = app
+            .sidebar_entries
+            .iter()
+            .position(|e| matches!(e, SidebarEntry::Unassigned))
+            .unwrap();
+        app.selected_sidebar_index = unassigned_idx;
+        app.add_todo("Loose task".into());
+        let unassigned: Vec<_> = app
+            .doc
+            .items
+            .values()
+            .filter(|i| i.list_id.is_none())
+            .collect();
+        assert_eq!(unassigned.len(), 2);
+        assert!(unassigned.iter().any(|i| i.title == "Loose task"));
     }
 
     #[test]
@@ -3312,8 +3611,8 @@ mod tests {
         app.selected_sidebar_index = 1;
         app.selected_item_index = 0;
         app.move_todo_down();
-        assert_eq!(app.lists[0].items[0].title, "A");
-        assert_eq!(app.lists[0].items[1].title, "B");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "A");
+        assert_eq!(app.items_for_nth_list(0)[1].title, "B");
     }
 
     #[test]
@@ -3489,8 +3788,8 @@ mod tests {
 
         app.archive_done_items();
 
-        assert_eq!(app.lists[0].items.len(), 1);
-        assert_eq!(app.lists[0].items[0].title, "Keep this");
+        assert_eq!(app.items_for_nth_list(0).len(), 1);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Keep this");
     }
 
     #[test]
@@ -3505,10 +3804,10 @@ mod tests {
         app.selected_list_index = 0;
 
         app.archive_done_items();
-        assert_eq!(app.lists[0].items.len(), 1);
+        assert_eq!(app.items_for_nth_list(0).len(), 1);
 
         app.undo();
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
     }
 
     #[test]
@@ -3535,7 +3834,7 @@ mod tests {
         }]);
         app.active_pane = Pane::Main;
         app.toggle_tag("focus");
-        assert_eq!(app.lists[0].items[0].tags, vec!["focus"]);
+        assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["focus"]);
     }
 
     #[test]
@@ -3552,7 +3851,7 @@ mod tests {
         }]);
         app.active_pane = Pane::Main;
         app.toggle_tag("focus");
-        assert!(app.lists[0].items[0].tags.is_empty());
+        assert!(app.items_for_nth_list(0)[0].tags.is_empty());
     }
 
     #[test]
@@ -3569,7 +3868,7 @@ mod tests {
         }]);
         app.active_pane = Pane::Main;
         app.toggle_tag("focus");
-        assert_eq!(app.lists[0].items[0].tags, vec!["code", "focus"]);
+        assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["code", "focus"]);
     }
 
     #[test]
@@ -3581,8 +3880,8 @@ mod tests {
         }]);
         app.active_pane = Pane::Main;
         app.toggle_tag("focus");
-        assert_eq!(app.lists[0].items[0].tags, vec!["focus"]);
+        assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["focus"]);
         app.undo();
-        assert!(app.lists[0].items[0].tags.is_empty());
+        assert!(app.items_for_nth_list(0)[0].tags.is_empty());
     }
 }

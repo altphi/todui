@@ -84,21 +84,25 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_main_pane(app: &mut App, key: KeyEvent) {
-    let tag_view = app.is_tag_view();
+    let virtual_view = app.is_virtual_view();
     let key_tuple = (key.modifiers, key.code);
 
     if let Some(action) = app.key_config.normal_main.get(&key_tuple).cloned() {
         match action {
             Action::ToggleDone => app.toggle_done_selected(),
             Action::EditItem => {
-                if let Some((li, ii)) = app.resolve_selected_item() {
-                    let title = app.lists[li].items[ii].title.clone();
+                if let Some(id) = app.resolve_selected_item()
+                    && let Some(item) = app.doc.items.get(&id)
+                {
+                    let title = item.title.clone();
                     app.start_input(InputMode::EditingItem, &title);
                 }
             }
             Action::EditTags => {
-                if let Some((li, ii)) = app.resolve_selected_item() {
-                    let tags_str = app.lists[li].items[ii]
+                if let Some(id) = app.resolve_selected_item()
+                    && let Some(item) = app.doc.items.get(&id)
+                {
+                    let tags_str = item
                         .tags
                         .iter()
                         .map(|t| format!("@{}", t))
@@ -108,19 +112,19 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 }
             }
             Action::ToggleSelect => {
-                if !tag_view {
+                if !virtual_view {
                     app.toggle_select_current();
                 }
             }
             Action::Delete => {
-                if tag_view {
+                if virtual_view {
                     app.delete_todo();
                 } else {
                     app.delete_selected();
                 }
             }
             Action::MoveToList => {
-                if !tag_view {
+                if !virtual_view {
                     app.start_move_to_list();
                 }
             }
@@ -128,35 +132,37 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
                 app.clear_selection();
             }
             Action::MoveItemUp => {
-                if !tag_view {
+                if !virtual_view {
                     app.move_todo_up();
                 }
             }
             Action::MoveItemDown => {
-                if !tag_view {
+                if !virtual_view {
                     app.move_todo_down();
                 }
             }
             Action::MoveItemToTop => {
-                if !tag_view {
+                if !virtual_view {
                     app.move_todo_to_top();
                 }
             }
             Action::MoveItemToBottom => {
-                if !tag_view {
+                if !virtual_view {
                     app.move_todo_to_bottom();
                 }
             }
             Action::ToggleShowDone => app.toggle_show_done(),
             Action::StartFocus => app.start_focus(),
             Action::StartFilter => {
-                if !tag_view {
+                if !virtual_view {
                     app.start_filter();
                 }
             }
             Action::EditTime => {
-                if let Some((li, ii)) = app.resolve_selected_item() {
-                    let time_str = crate::storage::format_time(app.lists[li].items[ii].time_secs);
+                if let Some(id) = app.resolve_selected_item()
+                    && let Some(item) = app.doc.items.get(&id)
+                {
+                    let time_str = crate::storage::format_time(item.time_secs);
                     let prefill = if time_str.is_empty() {
                         "0m".to_string()
                     } else {
@@ -167,9 +173,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
             }
             Action::StartArchive => app.start_archive(),
             Action::AddItem => {
-                if !tag_view {
-                    app.start_input(InputMode::AddingItem, "");
-                }
+                app.start_input(InputMode::AddingItem, "");
             }
             Action::ToggleTag(tag) => app.toggle_tag(&tag),
             _ => {}
@@ -185,7 +189,7 @@ fn handle_main_pane(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_sidebar(app: &mut App, key: KeyEvent) {
-    if app.is_tag_view() {
+    if app.is_virtual_view() {
         if let (KeyModifiers::NONE, KeyCode::Char(c)) = (key.modifiers, key.code) {
             app.start_search();
             app.input_insert_char(c);
@@ -207,7 +211,7 @@ fn handle_sidebar(app: &mut App, key: KeyEvent) {
                 }
             }
             Action::DeleteList => {
-                if app.lists.len() > 1 {
+                if app.doc.ordered_lists().len() > 1 {
                     app.input_mode = InputMode::ConfirmDelete;
                 }
             }
@@ -504,10 +508,10 @@ mod tests {
     #[test]
     fn test_toggle_done() {
         let mut app = sample_app();
-        assert!(!app.lists[0].items[0].done);
+        assert!(!app.items_for_nth_list(0)[0].done);
 
         handle_key(&mut app, alt(KeyCode::Enter));
-        assert!(app.lists[0].items[0].done);
+        assert!(app.items_for_nth_list(0)[0].done);
     }
 
     #[test]
@@ -523,8 +527,8 @@ mod tests {
 
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists[0].items.len(), 4);
-        assert_eq!(app.lists[0].items[0].title, "New task");
+        assert_eq!(app.items_for_nth_list(0).len(), 4);
+        assert_eq!(app.items_for_nth_list(0)[0].title, "New task");
     }
 
     #[test]
@@ -546,9 +550,9 @@ mod tests {
     #[test]
     fn test_delete_todo() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
         handle_key(&mut app, key(KeyCode::Delete));
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
     }
 
     #[test]
@@ -558,13 +562,13 @@ mod tests {
         app.selected_item_index = 1; // Task C
 
         handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].items[0].title, "Task C");
-        assert_eq!(app.lists[0].items[2].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "Task A");
         assert_eq!(app.selected_item_index, 0);
 
         handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].items[0].title, "Task A");
-        assert_eq!(app.lists[0].items[2].title, "Task C");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "Task C");
         assert_eq!(app.selected_item_index, 1);
     }
 
@@ -589,7 +593,7 @@ mod tests {
             &mut app,
             key_with_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SUPER),
         );
-        assert_eq!(app.lists[0].items[0].title, "Task B");
+        assert_eq!(app.items_for_nth_list(0)[0].title, "Task B");
     }
 
     #[test]
@@ -601,7 +605,7 @@ mod tests {
             &mut app,
             key_with_mod(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SUPER),
         );
-        assert_eq!(app.lists[0].items[2].title, "Task A");
+        assert_eq!(app.items_for_nth_list(0)[2].title, "Task A");
     }
 
     #[test]
@@ -611,12 +615,12 @@ mod tests {
         app.selected_list_index = 0;
 
         handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::ALT));
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 1);
 
         handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::ALT));
-        assert_eq!(app.lists[0].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -634,16 +638,16 @@ mod tests {
             &mut app,
             key_with_mod(KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SUPER),
         );
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Gamma");
-        assert_eq!(app.lists[2].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Gamma");
+        assert_eq!(app.nth_list(2).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 2);
 
         handle_key(
             &mut app,
             key_with_mod(KeyCode::Up, KeyModifiers::ALT | KeyModifiers::SUPER),
         );
-        assert_eq!(app.lists[0].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -661,25 +665,25 @@ mod tests {
     #[test]
     fn test_undo_redo_keys() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
 
         handle_key(&mut app, key(KeyCode::Delete));
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
 
         handle_key(&mut app, alt(KeyCode::Char('u')));
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
 
         handle_key(
             &mut app,
             key_with_mod(KeyCode::Char('y'), KeyModifiers::CONTROL),
         );
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
 
         handle_key(
             &mut app,
             key_with_mod(KeyCode::Char('z'), KeyModifiers::CONTROL),
         );
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
     }
 
     #[test]
@@ -703,28 +707,28 @@ mod tests {
     fn test_sidebar_confirm_delete() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
 
         handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::ConfirmDelete);
 
         handle_key(&mut app, key(KeyCode::Char('y')));
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists.len(), 1);
+        assert_eq!(app.num_lists(), 1);
     }
 
     #[test]
     fn test_sidebar_cancel_delete() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
 
         handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::ConfirmDelete);
 
         handle_key(&mut app, key(KeyCode::Char('n')));
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
     }
 
     #[test]
@@ -734,8 +738,8 @@ mod tests {
         app.selected_list_index = 1;
 
         handle_key(&mut app, key_with_mod(KeyCode::Up, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 0);
     }
 
@@ -746,8 +750,8 @@ mod tests {
         app.selected_list_index = 0;
 
         handle_key(&mut app, key_with_mod(KeyCode::Down, KeyModifiers::SHIFT));
-        assert_eq!(app.lists[0].name, "Beta");
-        assert_eq!(app.lists[1].name, "Alpha");
+        assert_eq!(app.nth_list(0).unwrap().name, "Beta");
+        assert_eq!(app.nth_list(1).unwrap().name, "Alpha");
         assert_eq!(app.selected_list_index, 1);
     }
 
@@ -881,7 +885,7 @@ mod tests {
     #[test]
     fn test_edit_time_entry() {
         let mut app = sample_app();
-        app.lists[0].items[0].time_secs = 3600;
+        app.set_item_field(0, 0, |item| item.time_secs = 3600);
         handle_key(
             &mut app,
             key_with_mod(KeyCode::Char('T'), KeyModifiers::ALT | KeyModifiers::SHIFT),
@@ -933,7 +937,7 @@ mod tests {
     #[test]
     fn test_filter_mode_navigation() {
         let mut app = sample_app();
-        app.lists[0].items[1].tags = vec!["review".to_string()];
+        app.set_item_field(0, 1, |item| item.tags = vec!["review".to_string()]);
         handle_key(
             &mut app,
             key_with_mod(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT),
@@ -1056,7 +1060,7 @@ mod tests {
     #[test]
     fn test_autocomplete_up_down_navigates() {
         let mut app = sample_app();
-        app.lists[0].items[1].tags = vec!["cooking".to_string()];
+        app.set_item_field(0, 1, |item| item.tags = vec!["cooking".to_string()]);
         handle_key(&mut app, key(KeyCode::Char(' ')));
         handle_key(&mut app, key(KeyCode::Char('@')));
         handle_key(&mut app, key(KeyCode::Char('c')));
@@ -1082,16 +1086,16 @@ mod tests {
     #[test]
     fn test_delete_key_deletes_in_main() {
         let mut app = sample_app();
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
         handle_key(&mut app, key(KeyCode::Delete));
-        assert_eq!(app.lists[0].items.len(), 2);
+        assert_eq!(app.items_for_nth_list(0).len(), 2);
     }
 
     #[test]
     fn test_delete_key_in_sidebar_deletes_list() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        assert_eq!(app.lists.len(), 2);
+        assert_eq!(app.num_lists(), 2);
         handle_key(&mut app, key(KeyCode::Delete));
         assert_eq!(app.input_mode, InputMode::ConfirmDelete);
     }
@@ -1110,7 +1114,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::MovingToList);
         handle_key(&mut app, key(KeyCode::Enter));
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists[1].items.len(), 1);
+        assert_eq!(app.items_for_nth_list(1).len(), 1);
     }
 
     #[test]
@@ -1120,7 +1124,7 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::MovingToList);
         handle_key(&mut app, key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert_eq!(app.lists[0].items.len(), 3);
+        assert_eq!(app.items_for_nth_list(0).len(), 3);
     }
 
     #[test]
@@ -1136,11 +1140,11 @@ mod tests {
     fn test_sidebar_alt_d_toggles_list_type() {
         let mut app = sample_app();
         app.active_pane = Pane::Sidebar;
-        assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
+        assert_eq!(app.nth_list(0).unwrap().list_type, "normal");
         handle_key(&mut app, alt(KeyCode::Char('d')));
-        assert_eq!(app.lists[0].list_type, crate::model::ListType::Daily);
+        assert_eq!(app.nth_list(0).unwrap().list_type, "daily");
         handle_key(&mut app, alt(KeyCode::Char('d')));
-        assert_eq!(app.lists[0].list_type, crate::model::ListType::Normal);
+        assert_eq!(app.nth_list(0).unwrap().list_type, "normal");
     }
 
     #[test]
@@ -1176,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn test_main_no_add_in_tag_view() {
+    fn test_main_add_allowed_in_tag_view() {
         let mut work = TodoList::new("Work");
         work.items.push(TodoItem {
             title: "A".into(),
@@ -1188,7 +1192,7 @@ mod tests {
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
         handle_key(&mut app, key(KeyCode::Char(' ')));
-        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.input_mode, InputMode::AddingItem);
     }
 
     #[test]
@@ -1204,7 +1208,7 @@ mod tests {
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
         handle_key(&mut app, alt(KeyCode::Enter));
-        assert!(app.lists[0].items[0].done);
+        assert!(app.items_for_nth_list(0)[0].done);
     }
 
     #[test]
@@ -1237,7 +1241,7 @@ mod tests {
         app.active_pane = Pane::Main;
         app.selected_sidebar_index = 1;
         handle_key(&mut app, key(KeyCode::Delete));
-        assert_eq!(app.lists[0].items.len(), 0);
+        assert_eq!(app.items_for_nth_list(0).len(), 0);
     }
 
     #[test]
@@ -1287,7 +1291,7 @@ mod tests {
     fn test_alt_a_starts_archive() {
         let mut app = sample_app();
         app.active_pane = Pane::Main;
-        app.lists[0].items[0].done = true;
+        app.set_item_field(0, 0, |item| item.done = true);
 
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT);
         handle_key(&mut app, key);
@@ -1299,14 +1303,14 @@ mod tests {
     fn test_confirm_archive_y_archives() {
         let mut app = sample_app();
         app.active_pane = Pane::Main;
-        app.lists[0].items[0].done = true;
+        app.set_item_field(0, 0, |item| item.done = true);
         app.input_mode = InputMode::ConfirmArchive;
 
         let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
         handle_key(&mut app, key);
 
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.lists[0].items.iter().all(|i| !i.done));
+        assert!(app.items_for_nth_list(0).iter().all(|i| !i.done));
     }
 
     #[test]
@@ -1339,10 +1343,10 @@ mod tests {
             crate::config::Action::ToggleTag("starred".to_string()),
         );
         handle_key(&mut app, alt(KeyCode::Char('s')));
-        assert_eq!(app.lists[0].items[0].tags, vec!["code", "starred"]);
+        assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["code", "starred"]);
 
         // Toggle off
         handle_key(&mut app, alt(KeyCode::Char('s')));
-        assert_eq!(app.lists[0].items[0].tags, vec!["code"]);
+        assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["code"]);
     }
 }

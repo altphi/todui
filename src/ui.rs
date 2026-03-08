@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::config::{Action, KeyConfig};
-use crate::model::{InputMode, ListType, Pane, SearchResult, SidebarEntry};
+use crate::model::{InputMode, Pane, SearchResult, SidebarEntry};
 
 pub fn render(app: &App, frame: &mut Frame) {
     let outer = Layout::default()
@@ -23,10 +23,11 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_title_bar(app, frame, outer[0]);
 
     let longest_list_name = app
-        .lists
+        .doc
+        .ordered_lists()
         .iter()
         .map(|l| {
-            let extra = if l.list_type == ListType::Daily { 4 } else { 0 };
+            let extra = if l.list_type == "daily" { 4 } else { 0 };
             l.name.len() as u16 + extra
         })
         .max()
@@ -110,11 +111,16 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         .sidebar_entries
         .iter()
         .any(|e| matches!(e, SidebarEntry::Tag(_)));
-    let num_lists = app.lists.len();
-    let divider_offset: usize = if has_tags { 1 } else { 0 };
+    let num_lists = app.doc.ordered_lists().len();
+    let has_unassigned = app
+        .sidebar_entries
+        .iter()
+        .any(|e| matches!(e, SidebarEntry::Unassigned));
+    let has_virtual = has_tags || has_unassigned;
+    let divider_offset: usize = if has_virtual { 1 } else { 0 };
     let total_rows = app.sidebar_entries.len() + divider_offset;
 
-    let selected_visual_row = if has_tags && app.selected_sidebar_index >= num_lists {
+    let selected_visual_row = if has_virtual && app.selected_sidebar_index >= num_lists {
         app.selected_sidebar_index + 1
     } else {
         app.selected_sidebar_index
@@ -129,7 +135,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
 
     let mut items: Vec<ListItem> = Vec::new();
     for visual_row in offset..(offset + visible_height).min(total_rows) {
-        if has_tags && visual_row == num_lists {
+        if has_virtual && visual_row == num_lists {
             let sep = "\u{2500}".repeat(inner.width as usize);
             items.push(ListItem::new(Line::from(Span::styled(
                 sep,
@@ -138,7 +144,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
             continue;
         }
 
-        let entry_index = if has_tags && visual_row > num_lists {
+        let entry_index = if has_virtual && visual_row > num_lists {
             visual_row - 1
         } else {
             visual_row
@@ -149,10 +155,11 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         }
 
         let is_selected = entry_index == app.selected_sidebar_index;
+        let ordered_lists = app.doc.ordered_lists();
         match &app.sidebar_entries[entry_index] {
             SidebarEntry::List(i) => {
-                let list = &app.lists[*i];
-                let indicator = if list.list_type == ListType::Daily {
+                let list = &ordered_lists[*i];
+                let indicator = if list.list_type == "daily" {
                     if app.ascii_mode { " (d)" } else { " \u{21bb}" }
                 } else {
                     ""
@@ -165,6 +172,18 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
+                };
+                items.push(ListItem::new(Line::from(Span::styled(content, style))));
+            }
+            SidebarEntry::Unassigned => {
+                let content = "  Unassigned".to_string();
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
                 };
                 items.push(ListItem::new(Line::from(Span::styled(content, style))));
             }
@@ -197,6 +216,8 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
     let title = if let Some(tag) = app.selected_tag_name() {
         format!(" @{} ", tag)
+    } else if app.is_unassigned_view() {
+        " Unassigned ".to_string()
     } else {
         app.current_list()
             .map(|l| format!(" {} ", l.name))
@@ -213,11 +234,19 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.is_tag_view() {
-        let tag_items = app.tag_visible_items();
+    if app.is_tag_view() || app.is_unassigned_view() {
+        let tag_items = if app.is_tag_view() {
+            app.tag_visible_items()
+        } else {
+            app.unassigned_visible_items()
+        };
         if tag_items.is_empty() {
-            let hint = Paragraph::new("No items with this tag.")
-                .style(Style::default().fg(Color::DarkGray));
+            let hint_text = if app.is_tag_view() {
+                "No items with this tag."
+            } else {
+                "No unassigned items."
+            };
+            let hint = Paragraph::new(hint_text).style(Style::default().fg(Color::DarkGray));
             frame.render_widget(hint, inner);
         } else {
             let visible_height = inner.height as usize;
@@ -232,9 +261,13 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                 .enumerate()
                 .skip(offset)
                 .take(visible_height)
-                .map(|(vi, &(li, ii))| {
-                    let item = &app.lists[li].items[ii];
-                    let list_name = &app.lists[li].name;
+                .map(|(vi, (_item_id, item))| {
+                    let list_name = item
+                        .list_id
+                        .as_ref()
+                        .and_then(|lid| app.doc.lists.get(lid))
+                        .map(|l| l.name.as_str())
+                        .unwrap_or("Unassigned");
                     let is_cursor = is_active && vi == app.selected_item_index;
 
                     let checkbox = if app.ascii_mode {
@@ -375,8 +408,8 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
             .enumerate()
             .skip(offset)
             .take(visible_height)
-            .map(|(vi, (real_idx, item))| {
-                let is_multi_selected = app.selected_items.contains(real_idx);
+            .map(|(vi, (item_id, item))| {
+                let is_multi_selected = app.selected_items.contains(*item_id);
 
                 let checkbox = if is_multi_selected {
                     if app.ascii_mode { "[*]" } else { "◆" }
@@ -738,9 +771,13 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
             .take(visible_height)
             .map(|(i, result)| {
                 let is_selected = i == app.search_selected;
+                let ordered_lists = app.doc.ordered_lists();
                 match result {
                     SearchResult::List(li) => {
-                        let name = &app.lists[*li].name;
+                        let name = ordered_lists
+                            .get(*li)
+                            .map(|l| l.name.as_str())
+                            .unwrap_or("?");
                         let style = if is_selected {
                             Style::default().fg(Color::Cyan).bg(Color::DarkGray)
                         } else {
@@ -748,26 +785,37 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                         };
                         ListItem::new(Line::from(Span::styled(format!("  # {}", name), style)))
                     }
-                    SearchResult::Item(li, ii) => {
-                        let item = &app.lists[*li].items[*ii];
-                        let list_name = &app.lists[*li].name;
-                        let checkbox = if app.ascii_mode {
-                            if item.done { "[x]" } else { "[ ]" }
-                        } else if item.done {
-                            "✔"
+                    SearchResult::Item(item_id) => {
+                        let (text, is_done) = if let Some(item) = app.doc.items.get(item_id) {
+                            let list_name = item
+                                .list_id
+                                .as_ref()
+                                .and_then(|lid| app.doc.lists.get(lid))
+                                .map(|l| l.name.as_str())
+                                .unwrap_or("Unassigned");
+                            let checkbox = if app.ascii_mode {
+                                if item.done { "[x]" } else { "[ ]" }
+                            } else if item.done {
+                                "\u{2714}"
+                            } else {
+                                "\u{2751}"
+                            };
+                            let time_part = if item.time_secs > 0 {
+                                format!("  {}", crate::storage::format_time(item.time_secs))
+                            } else {
+                                String::new()
+                            };
+                            (
+                                format!(
+                                    "  {} {}{}  \u{2014} {}",
+                                    checkbox, item.title, time_part, list_name
+                                ),
+                                item.done,
+                            )
                         } else {
-                            "❑"
+                            ("  ? (deleted)".to_string(), false)
                         };
-                        let time_part = if item.time_secs > 0 {
-                            format!("  {}", crate::storage::format_time(item.time_secs))
-                        } else {
-                            String::new()
-                        };
-                        let text = format!(
-                            "  {} {}{}  \u{2014} {}",
-                            checkbox, item.title, time_part, list_name
-                        );
-                        let style = if item.done {
+                        let style = if is_done {
                             if is_selected {
                                 Style::default().fg(Color::Gray).bg(Color::DarkGray)
                             } else {
@@ -925,7 +973,20 @@ fn render_focus_overlay(app: &App, frame: &mut Frame) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let item = &app.lists[app.focus_list].items[app.focus_item];
+    let empty_item = crate::crdt::CrdtItem {
+        id: String::new(),
+        title: String::new(),
+        done: false,
+        tags: vec![],
+        time_secs: 0,
+        list_id: None,
+        position: 0.0,
+    };
+    let item = app
+        .focus_item_id
+        .as_ref()
+        .and_then(|id| app.doc.items.get(id))
+        .unwrap_or(&empty_item);
     let session_secs = app.focus_elapsed_secs();
     let total_secs = item.time_secs + session_secs;
     let is_paused = app.focus_start.is_none();

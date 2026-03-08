@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod crdt;
 mod input;
 mod model;
 mod storage;
@@ -86,13 +87,17 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut Str
             }
         })?;
 
-        let has_event = if app.input_mode == model::InputMode::Focused {
-            event::poll(Duration::from_millis(250))?
+        let timeout = if app.input_mode == model::InputMode::Focused {
+            Duration::from_millis(250)
+        } else if app.is_dirty() {
+            Duration::from_millis(500)
         } else {
-            event::poll(Duration::from_secs(60))?
+            Duration::from_secs(60)
         };
+        let has_event = event::poll(timeout)?;
 
         if !has_event {
+            app.flush();
             continue;
         }
 
