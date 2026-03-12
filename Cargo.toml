@@ -13,7 +13,7 @@ color-eyre = "0.6.3"
 dirs = "6"
 shellexpand = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-toml = "0.8"
+toml = "1.0"
 serde = { version = "1", features = ["derive"] }
 automerge = "0.7"
 autosurgeon = "0.10"
