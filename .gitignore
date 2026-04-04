@@ -1,2 +1,5 @@
 **/target
 .worktrees/
+docs/
+CLAUDE.md
+.claude/

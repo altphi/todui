@@ -31,6 +31,9 @@ pub enum Action {
     StartFilter,
     EditTime,
     StartArchive,
+    StartSearch,
+    SwitchToSidebar,
+    SwitchToMain,
     AddItem,
     ClearSelection,
     ToggleTag(String),
@@ -140,6 +143,29 @@ impl Default for KeyConfig {
             (KeyModifiers::ALT, KeyCode::Char('c')),
             Action::SwitchContext,
         );
+        normal.insert((KeyModifiers::NONE, KeyCode::Char('j')), Action::MoveDown);
+        normal.insert((KeyModifiers::NONE, KeyCode::Char('k')), Action::MoveUp);
+        normal.insert(
+            (KeyModifiers::NONE, KeyCode::Char('h')),
+            Action::SwitchToSidebar,
+        );
+        normal.insert(
+            (KeyModifiers::NONE, KeyCode::Char('l')),
+            Action::SwitchToMain,
+        );
+        normal.insert(
+            (KeyModifiers::NONE, KeyCode::Char('g')),
+            Action::JumpToFirst,
+        );
+        normal.insert(
+            (KeyModifiers::SHIFT, KeyCode::Char('G')),
+            Action::JumpToLast,
+        );
+        normal.insert((KeyModifiers::NONE, KeyCode::Char('G')), Action::JumpToLast);
+        normal.insert(
+            (KeyModifiers::NONE, KeyCode::Char('/')),
+            Action::StartSearch,
+        );
 
         let mut normal_main = KeyMap::new();
         normal_main.insert((KeyModifiers::ALT, KeyCode::Enter), Action::ToggleDone);
@@ -192,7 +218,27 @@ impl Default for KeyConfig {
             (KeyModifiers::ALT, KeyCode::Char('a')),
             Action::StartArchive,
         );
-        normal_main.insert((KeyModifiers::NONE, KeyCode::Char(' ')), Action::AddItem);
+        normal_main.insert((KeyModifiers::NONE, KeyCode::Char(' ')), Action::ToggleDone);
+        normal_main.insert(
+            (KeyModifiers::SHIFT, KeyCode::Char('J')),
+            Action::MoveItemDown,
+        );
+        normal_main.insert(
+            (KeyModifiers::NONE, KeyCode::Char('J')),
+            Action::MoveItemDown,
+        );
+        normal_main.insert(
+            (KeyModifiers::SHIFT, KeyCode::Char('K')),
+            Action::MoveItemUp,
+        );
+        normal_main.insert((KeyModifiers::NONE, KeyCode::Char('K')), Action::MoveItemUp);
+        normal_main.insert((KeyModifiers::NONE, KeyCode::Char('a')), Action::AddItem);
+        normal_main.insert((KeyModifiers::NONE, KeyCode::Char('e')), Action::EditItem);
+        normal_main.insert(
+            (KeyModifiers::NONE, KeyCode::Char('x')),
+            Action::ToggleSelect,
+        );
+        normal_main.insert((KeyModifiers::NONE, KeyCode::Char('m')), Action::MoveToList);
         normal_main.insert((KeyModifiers::NONE, KeyCode::Esc), Action::ClearSelection);
 
         let mut normal_sidebar = KeyMap::new();
@@ -206,13 +252,27 @@ impl Default for KeyConfig {
         );
         normal_sidebar.insert((KeyModifiers::ALT, KeyCode::Char('N')), Action::AddList);
         normal_sidebar.insert((KeyModifiers::ALT, KeyCode::Char('n')), Action::AddList);
+        normal_sidebar.insert((KeyModifiers::NONE, KeyCode::Char('a')), Action::AddList);
         normal_sidebar.insert((KeyModifiers::NONE, KeyCode::Enter), Action::RenameList);
         normal_sidebar.insert((KeyModifiers::NONE, KeyCode::Delete), Action::DeleteList);
         normal_sidebar.insert((KeyModifiers::NONE, KeyCode::Backspace), Action::DeleteList);
         normal_sidebar.insert((KeyModifiers::SHIFT, KeyCode::Up), Action::MoveListUp);
         normal_sidebar.insert((KeyModifiers::ALT, KeyCode::Up), Action::MoveListUp);
+        normal_sidebar.insert(
+            (KeyModifiers::SHIFT, KeyCode::Char('K')),
+            Action::MoveListUp,
+        );
+        normal_sidebar.insert((KeyModifiers::NONE, KeyCode::Char('K')), Action::MoveListUp);
         normal_sidebar.insert((KeyModifiers::SHIFT, KeyCode::Down), Action::MoveListDown);
         normal_sidebar.insert((KeyModifiers::ALT, KeyCode::Down), Action::MoveListDown);
+        normal_sidebar.insert(
+            (KeyModifiers::SHIFT, KeyCode::Char('J')),
+            Action::MoveListDown,
+        );
+        normal_sidebar.insert(
+            (KeyModifiers::NONE, KeyCode::Char('J')),
+            Action::MoveListDown,
+        );
         normal_sidebar.insert(
             (KeyModifiers::ALT | KeyModifiers::SUPER, KeyCode::Up),
             Action::MoveListToTop,
@@ -308,6 +368,9 @@ fn parse_action(value: &toml::Value) -> Option<Action> {
             "start_filter" => Some(Action::StartFilter),
             "edit_time" => Some(Action::EditTime),
             "start_archive" => Some(Action::StartArchive),
+            "start_search" => Some(Action::StartSearch),
+            "switch_to_sidebar" => Some(Action::SwitchToSidebar),
+            "switch_to_main" => Some(Action::SwitchToMain),
             "add_item" => Some(Action::AddItem),
             "clear_selection" => Some(Action::ClearSelection),
             "toggle_list_type" => Some(Action::ToggleListType),
@@ -700,6 +763,97 @@ mod tests {
     }
 
     #[test]
+    fn default_normal_vim_navigation_keys() {
+        let config = KeyConfig::default();
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('j'))),
+            Some(&Action::MoveDown)
+        );
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('k'))),
+            Some(&Action::MoveUp)
+        );
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('h'))),
+            Some(&Action::SwitchToSidebar)
+        );
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('l'))),
+            Some(&Action::SwitchToMain)
+        );
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('g'))),
+            Some(&Action::JumpToFirst)
+        );
+        assert_eq!(
+            config
+                .normal
+                .get(&(KeyModifiers::SHIFT, KeyCode::Char('G'))),
+            Some(&Action::JumpToLast)
+        );
+        assert_eq!(
+            config.normal.get(&(KeyModifiers::NONE, KeyCode::Char('/'))),
+            Some(&Action::StartSearch)
+        );
+    }
+
+    #[test]
+    fn default_normal_main_vim_keys() {
+        let config = KeyConfig::default();
+        assert_eq!(
+            config
+                .normal_main
+                .get(&(KeyModifiers::NONE, KeyCode::Char('a'))),
+            Some(&Action::AddItem)
+        );
+        assert_eq!(
+            config
+                .normal_main
+                .get(&(KeyModifiers::NONE, KeyCode::Char('e'))),
+            Some(&Action::EditItem)
+        );
+        assert_eq!(
+            config
+                .normal_main
+                .get(&(KeyModifiers::NONE, KeyCode::Char('x'))),
+            Some(&Action::ToggleSelect)
+        );
+        assert_eq!(
+            config
+                .normal_main
+                .get(&(KeyModifiers::NONE, KeyCode::Char('m'))),
+            Some(&Action::MoveToList)
+        );
+    }
+
+    #[test]
+    fn default_normal_sidebar_vim_keys() {
+        let config = KeyConfig::default();
+        assert_eq!(
+            config
+                .normal_sidebar
+                .get(&(KeyModifiers::NONE, KeyCode::Char('a'))),
+            Some(&Action::AddList)
+        );
+    }
+
+    #[test]
+    fn parse_action_new_variants() {
+        assert_eq!(
+            parse_action(&toml::Value::String("start_search".into())),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(
+            parse_action(&toml::Value::String("switch_to_sidebar".into())),
+            Some(Action::SwitchToSidebar)
+        );
+        assert_eq!(
+            parse_action(&toml::Value::String("switch_to_main".into())),
+            Some(Action::SwitchToMain)
+        );
+    }
+
+    #[test]
     fn default_normal_undo_redo_keys() {
         let config = KeyConfig::default();
         assert_eq!(
@@ -768,7 +922,7 @@ mod tests {
             config
                 .normal_main
                 .get(&(KeyModifiers::NONE, KeyCode::Char(' '))),
-            Some(&Action::AddItem)
+            Some(&Action::ToggleDone)
         );
     }
 

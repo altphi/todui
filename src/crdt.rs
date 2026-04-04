@@ -6,6 +6,10 @@ use std::io;
 use std::path::Path;
 use uuid::Uuid;
 
+fn default_false() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Reconcile, Hydrate)]
 pub struct CrdtItem {
     pub id: String,
@@ -15,6 +19,8 @@ pub struct CrdtItem {
     pub time_secs: u64,
     pub list_id: Option<String>,
     pub position: f64,
+    #[autosurgeon(missing = "default_false")]
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Reconcile, Hydrate)]
@@ -46,7 +52,9 @@ pub fn save_document(
     }
     reconcile(auto_doc, data).map_err(|e| io::Error::other(e.to_string()))?;
     let bytes = auto_doc.save();
-    fs::write(path, bytes)
+    let tmp_path = path.with_extension("automerge.tmp");
+    fs::write(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, path)
 }
 
 #[cfg(test)]
@@ -85,6 +93,7 @@ pub fn migrate_from_lists(lists: &[TodoList]) -> CrdtDocument {
                 time_secs: item.time_secs,
                 list_id: Some(list_id.clone()),
                 position: item_idx as f64,
+                archived: false,
             };
             doc.items.insert(item_id, crdt_item);
         }
@@ -98,7 +107,7 @@ impl CrdtDocument {
         let mut items: Vec<&CrdtItem> = self
             .items
             .values()
-            .filter(|i| i.list_id.as_deref() == Some(list_id))
+            .filter(|i| !i.archived && i.list_id.as_deref() == Some(list_id))
             .collect();
         items.sort_by(|a, b| {
             a.position
@@ -113,7 +122,7 @@ impl CrdtDocument {
         let mut items: Vec<&CrdtItem> = self
             .items
             .values()
-            .filter(|i| i.tags.iter().any(|t| t == tag))
+            .filter(|i| !i.archived && i.tags.iter().any(|t| t == tag))
             .collect();
         items.sort_by(|a, b| {
             a.position
@@ -128,7 +137,7 @@ impl CrdtDocument {
         let mut items: Vec<&CrdtItem> = self
             .items
             .values()
-            .filter(|i| i.list_id.is_none())
+            .filter(|i| !i.archived && i.list_id.is_none())
             .collect();
         items.sort_by(|a, b| {
             a.position
@@ -154,6 +163,7 @@ impl CrdtDocument {
         let mut tags: Vec<String> = self
             .items
             .values()
+            .filter(|i| !i.archived)
             .flat_map(|i| i.tags.iter().cloned())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -166,7 +176,7 @@ impl CrdtDocument {
         let max = self
             .items
             .values()
-            .filter(|i| i.list_id.as_deref() == Some(list_id))
+            .filter(|i| !i.archived && i.list_id.as_deref() == Some(list_id))
             .map(|i| i.position)
             .fold(f64::NEG_INFINITY, f64::max);
         if max == f64::NEG_INFINITY {
@@ -180,7 +190,7 @@ impl CrdtDocument {
         let max = self
             .items
             .values()
-            .filter(|i| i.list_id.is_none())
+            .filter(|i| !i.archived && i.list_id.is_none())
             .map(|i| i.position)
             .fold(f64::NEG_INFINITY, f64::max);
         if max == f64::NEG_INFINITY {
@@ -208,6 +218,10 @@ pub fn load_context_document(context_dir: &Path) -> io::Result<(AutoCommit, Crdt
     let automerge_path = context_dir.join("todui.automerge");
     if automerge_path.exists() {
         return load_document(&automerge_path);
+    }
+
+    if !context_dir.exists() {
+        fs::create_dir_all(context_dir)?;
     }
 
     let md_files_exist = fs::read_dir(context_dir)?
@@ -248,6 +262,7 @@ pub fn load_context_document(context_dir: &Path) -> io::Result<(AutoCommit, Crdt
     Ok((auto_doc, data))
 }
 
+#[cfg(test)]
 pub fn save_context_document(
     context_dir: &Path,
     auto_doc: &mut AutoCommit,
@@ -285,6 +300,7 @@ mod tests {
             time_secs: 0,
             list_id: None,
             position: 1.0,
+            archived: false,
         };
         let mut doc = AutoCommit::new();
         reconcile(&mut doc, &item).unwrap();
@@ -325,6 +341,7 @@ mod tests {
             time_secs: 0,
             list_id: Some("list-1".to_string()),
             position: 1.0,
+            archived: false,
         };
         let list = CrdtList {
             id: "list-1".to_string(),
@@ -355,6 +372,7 @@ mod tests {
             time_secs: 0,
             list_id: Some("list-1".to_string()),
             position: 1.0,
+            archived: false,
         };
         let mut doc = AutoCommit::new();
         reconcile(&mut doc, &item).unwrap();
@@ -375,6 +393,7 @@ mod tests {
                 time_secs: 60,
                 list_id: None,
                 position: 1.0,
+                archived: false,
             },
         );
 
@@ -415,6 +434,7 @@ mod tests {
                 time_secs: 0,
                 list_id: Some("l1".to_string()),
                 position: 1.0,
+                archived: false,
             },
         );
 
@@ -573,6 +593,7 @@ mod tests {
                 time_secs: 0,
                 list_id: Some("l1".to_string()),
                 position: 0.0,
+                archived: false,
             },
         );
         doc.items.insert(
@@ -585,6 +606,7 @@ mod tests {
                 time_secs: 2700,
                 list_id: Some("l1".to_string()),
                 position: 1.0,
+                archived: false,
             },
         );
         doc.items.insert(
@@ -597,6 +619,7 @@ mod tests {
                 time_secs: 0,
                 list_id: Some("l2".to_string()),
                 position: 0.0,
+                archived: false,
             },
         );
         doc.items.insert(
@@ -609,6 +632,7 @@ mod tests {
                 time_secs: 0,
                 list_id: None,
                 position: 0.0,
+                archived: false,
             },
         );
         doc
@@ -743,6 +767,7 @@ mod tests {
                 time_secs: 3600,
                 list_id: Some("l1".to_string()),
                 position: 0.0,
+                archived: false,
             },
         );
 
@@ -791,5 +816,197 @@ mod tests {
         assert!(ctx.join(".md-backup").join("personal.md").exists());
         assert!(!ctx.join("work.md").exists());
         assert!(!ctx.join("personal.md").exists());
+    }
+
+    #[test]
+    fn test_automerge_sync_roundtrip() {
+        use automerge::sync::{self, SyncDoc};
+
+        let empty = CrdtDocument::default();
+        let mut auto1 = automerge::AutoCommit::new();
+        autosurgeon::reconcile(&mut auto1, &empty).unwrap();
+
+        let mut auto2 = automerge::AutoCommit::load(&auto1.save()).unwrap();
+
+        let mut doc1: CrdtDocument = autosurgeon::hydrate(&auto1).unwrap();
+        doc1.items.insert(
+            "item1".into(),
+            CrdtItem {
+                id: "item1".into(),
+                title: "From doc1".into(),
+                done: false,
+                tags: vec![],
+                time_secs: 0,
+                list_id: None,
+                position: 1.0,
+                archived: false,
+            },
+        );
+        autosurgeon::reconcile(&mut auto1, &doc1).unwrap();
+
+        let mut doc2: CrdtDocument = autosurgeon::hydrate(&auto2).unwrap();
+        doc2.items.insert(
+            "item2".into(),
+            CrdtItem {
+                id: "item2".into(),
+                title: "From doc2".into(),
+                done: false,
+                tags: vec![],
+                time_secs: 0,
+                list_id: None,
+                position: 2.0,
+                archived: false,
+            },
+        );
+        autosurgeon::reconcile(&mut auto2, &doc2).unwrap();
+
+        let mut state1 = sync::State::new();
+        let mut state2 = sync::State::new();
+
+        for _ in 0..10 {
+            let msg1 = auto1.sync().generate_sync_message(&mut state1);
+            let msg2 = auto2.sync().generate_sync_message(&mut state2);
+
+            let done = msg1.is_none() && msg2.is_none();
+
+            if let Some(msg) = msg1 {
+                auto2.sync().receive_sync_message(&mut state2, msg).unwrap();
+            }
+            if let Some(msg) = msg2 {
+                auto1.sync().receive_sync_message(&mut state1, msg).unwrap();
+            }
+
+            if done {
+                break;
+            }
+        }
+
+        let merged1: CrdtDocument = autosurgeon::hydrate(&auto1).unwrap();
+        let merged2: CrdtDocument = autosurgeon::hydrate(&auto2).unwrap();
+
+        assert_eq!(merged1.items.len(), 2);
+        assert_eq!(merged2.items.len(), 2);
+        assert!(merged1.items.contains_key("item1"));
+        assert!(merged1.items.contains_key("item2"));
+        assert_eq!(merged1, merged2);
+    }
+
+    #[test]
+    fn test_sync_message_encode_decode() {
+        use automerge::sync::{self, SyncDoc};
+
+        let mut auto = automerge::AutoCommit::new();
+        let doc = CrdtDocument::default();
+        autosurgeon::reconcile(&mut auto, &doc).unwrap();
+
+        let mut state = sync::State::new();
+        let msg = auto.sync().generate_sync_message(&mut state).unwrap();
+
+        let bytes = msg.encode();
+        let decoded = automerge::sync::Message::decode(&bytes).unwrap();
+
+        let mut auto2 = automerge::AutoCommit::new();
+        let mut state2 = sync::State::new();
+        auto2
+            .sync()
+            .receive_sync_message(&mut state2, decoded)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_sync_two_clients_through_server() {
+        use automerge::sync::{self, SyncDoc};
+
+        // Simulate a server doc (empty)
+        let mut server_doc = automerge::AutoCommit::new();
+
+        // Client 1: has some items
+        let mut client1_data = CrdtDocument::default();
+        client1_data.lists.insert(
+            "list1".into(),
+            CrdtList {
+                id: "list1".into(),
+                name: "Inbox".into(),
+                list_type: "normal".into(),
+                last_reset: None,
+                position: 1.0,
+            },
+        );
+        client1_data.items.insert(
+            "item1".into(),
+            CrdtItem {
+                id: "item1".into(),
+                title: "Buy milk".into(),
+                done: false,
+                tags: vec!["errands".into()],
+                time_secs: 0,
+                list_id: Some("list1".into()),
+                position: 1.0,
+                archived: false,
+            },
+        );
+        let mut client1 = automerge::AutoCommit::new();
+        autosurgeon::reconcile(&mut client1, &client1_data).unwrap();
+
+        // Sync client1 -> server
+        let mut c1_state = sync::State::new();
+        let mut s1_state = sync::State::new();
+        loop {
+            let c_msg = client1.sync().generate_sync_message(&mut c1_state);
+            let s_msg = server_doc.sync().generate_sync_message(&mut s1_state);
+
+            if c_msg.is_none() && s_msg.is_none() {
+                break;
+            }
+
+            if let Some(msg) = c_msg {
+                server_doc
+                    .sync()
+                    .receive_sync_message(&mut s1_state, msg)
+                    .unwrap();
+            }
+            if let Some(msg) = s_msg {
+                client1
+                    .sync()
+                    .receive_sync_message(&mut c1_state, msg)
+                    .unwrap();
+            }
+        }
+
+        // Client 2: starts empty, syncs from server
+        let mut client2 = automerge::AutoCommit::new();
+        let mut c2_state = sync::State::new();
+        let mut s2_state = sync::State::new();
+        loop {
+            let s_msg = server_doc.sync().generate_sync_message(&mut s2_state);
+            let c_msg = client2.sync().generate_sync_message(&mut c2_state);
+
+            if s_msg.is_none() && c_msg.is_none() {
+                break;
+            }
+
+            if let Some(msg) = s_msg {
+                client2
+                    .sync()
+                    .receive_sync_message(&mut c2_state, msg)
+                    .unwrap();
+            }
+            if let Some(msg) = c_msg {
+                server_doc
+                    .sync()
+                    .receive_sync_message(&mut s2_state, msg)
+                    .unwrap();
+            }
+        }
+
+        // Client 2 should now have client 1's data
+        let client2_data: CrdtDocument = autosurgeon::hydrate(&client2).unwrap();
+        assert_eq!(client2_data.items.len(), 1);
+        assert_eq!(client2_data.lists.len(), 1);
+        assert_eq!(client2_data.items.get("item1").unwrap().title, "Buy milk");
+        assert_eq!(
+            client2_data.items.get("item1").unwrap().tags,
+            vec!["errands".to_string()]
+        );
     }
 }

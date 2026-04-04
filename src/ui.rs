@@ -6,9 +6,26 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 
+use std::time::Duration;
+
 use crate::app::App;
 use crate::config::{Action, KeyConfig};
 use crate::model::{InputMode, Pane, SearchResult, SidebarEntry};
+
+const PANE_FLASH_DURATION: Duration = Duration::from_millis(150);
+
+fn pane_title_style(app: &App, pane: Pane) -> Style {
+    let is_active = app.active_pane == pane;
+    if !is_active {
+        return Style::default();
+    }
+    if let Some(switched_at) = app.pane_switch_at
+        && switched_at.elapsed() < PANE_FLASH_DURATION
+    {
+        return Style::default().fg(Color::Black).bg(Color::Cyan);
+    }
+    Style::default()
+}
 
 pub fn render(app: &App, frame: &mut Frame) {
     let outer = Layout::default()
@@ -78,14 +95,25 @@ pub fn render(app: &App, frame: &mut Frame) {
 
 fn render_title_bar(app: &App, frame: &mut Frame, area: Rect) {
     let title_text = app.current_context.clone();
-    let title = Paragraph::new(Line::from(vec![Span::styled(
+    let mut spans = vec![Span::styled(
         title_text,
         Style::default()
             .fg(Color::White)
             .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
-    )]))
-    .style(Style::default().bg(Color::DarkGray));
+    )];
+    if app.has_sync() {
+        let (label, color) = if app.sync_connected {
+            (" [sync]", Color::Green)
+        } else {
+            (" [offline]", Color::Yellow)
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(color).bg(Color::DarkGray),
+        ));
+    }
+    let title = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(title, area);
 }
 
@@ -97,8 +125,9 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         Color::DarkGray
     };
 
+    let title_style = pane_title_style(app, Pane::Sidebar);
     let block = Block::default()
-        .title(" Lists ")
+        .title(Line::styled(" Lists ", title_style))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
@@ -166,10 +195,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 };
                 let content = format!("  {}{}", list.name, indicator);
                 let style = if is_selected {
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -179,9 +205,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let content = "  Unassigned".to_string();
                 let style = if is_selected {
                     Style::default()
-                        .fg(Color::White)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
@@ -192,8 +217,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 let style = if is_selected {
                     Style::default()
                         .fg(Color::Blue)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Blue)
                 };
@@ -224,8 +248,9 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
             .unwrap_or_else(|| " Todos ".to_string())
     };
 
+    let title_style = pane_title_style(app, Pane::Main);
     let block = Block::default()
-        .title(title)
+        .title(Line::styled(title, title_style))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
@@ -285,11 +310,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                     };
 
                     let bg_style = if is_cursor {
-                        if item.done {
-                            base_style.fg(Color::Gray).bg(Color::DarkGray)
-                        } else {
-                            base_style.bg(Color::DarkGray)
-                        }
+                        base_style.add_modifier(Modifier::REVERSED)
                     } else {
                         base_style
                     };
@@ -337,10 +358,11 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                     ));
 
                     if item.time_secs > 0 {
+                        let time_style = Style::default().fg(Color::DarkGray);
                         let time_style = if is_cursor {
-                            Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                            time_style.add_modifier(Modifier::REVERSED)
                         } else {
-                            Style::default().fg(Color::DarkGray)
+                            time_style
                         };
                         spans.push(Span::styled(time_text, time_style));
                     }
@@ -352,17 +374,18 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                             Style::default().fg(Color::Blue)
                         };
                         let tag_style = if is_cursor {
-                            tag_style.bg(Color::DarkGray)
+                            tag_style.add_modifier(Modifier::REVERSED)
                         } else {
                             tag_style
                         };
                         spans.push(Span::styled(tags_text, tag_style));
                     }
 
+                    let list_style = Style::default().fg(Color::DarkGray);
                     let list_style = if is_cursor {
-                        Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                        list_style.add_modifier(Modifier::REVERSED)
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        list_style
                     };
                     spans.push(Span::styled(list_suffix, list_style));
 
@@ -433,13 +456,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
 
                 let is_cursor = is_active && vi == app.selected_item_index;
                 let bg_style = if is_cursor {
-                    if is_multi_selected {
-                        base_style.bg(Color::DarkGray)
-                    } else if item.done {
-                        base_style.fg(Color::Gray).bg(Color::DarkGray)
-                    } else {
-                        base_style.bg(Color::DarkGray)
-                    }
+                    base_style.add_modifier(Modifier::REVERSED)
                 } else {
                     base_style
                 };
@@ -484,7 +501,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                 if item.time_secs > 0 {
                     let time_style = Style::default().fg(Color::DarkGray);
                     let time_style = if is_cursor {
-                        time_style.bg(Color::DarkGray).fg(Color::Gray)
+                        time_style.add_modifier(Modifier::REVERSED)
                     } else {
                         time_style
                     };
@@ -500,7 +517,7 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
                         Style::default().fg(Color::Blue)
                     };
                     let tag_style = if is_cursor {
-                        tag_style.bg(Color::DarkGray)
+                        tag_style.add_modifier(Modifier::REVERSED)
                     } else {
                         tag_style
                     };
@@ -549,7 +566,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             };
             if !app.selected_items.is_empty() {
                 format!(
-                    "  {} selected  Del: delete  \u{2325}\u{23ce}: done done  \u{2325}M: move  Esc: clear{}",
+                    "  {} selected  Del: delete  Space: done  m: move  Esc: clear{}",
                     app.selected_items.len(),
                     filter_indicator
                 )
@@ -557,13 +574,10 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 match app.active_pane {
                     Pane::Sidebar => {
                         if app.is_tag_view() {
-                            format!(
-                                "  \u{2191}/\u{2193}: navigate  Tab: todos  type: search{}",
-                                filter_indicator
-                            )
+                            format!("  j/k: navigate  l: todos  /: search{}", filter_indicator)
                         } else {
                             format!(
-                                "  \u{2191}/\u{2193}: navigate  \u{21e7}\u{2191}/\u{2193}: reorder  \u{2325}N: new  Enter: rename  \u{2325}D: daily  Del: delete  Tab: todos  type: search{}",
+                                "  j/k: navigate  J/K: reorder  a: new  Enter: rename  Del: delete  l: todos  /: search{}",
                                 filter_indicator
                             )
                         }
@@ -571,12 +585,12 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                     Pane::Main => {
                         if app.is_tag_view() {
                             format!(
-                                "  \u{2191}/\u{2193}: navigate  \u{2325}\u{23ce}: done  Enter: edit  Del: delete  type: search{}",
+                                "  j/k: navigate  Space: done  e: edit  Del: delete  /: search{}",
                                 filter_indicator
                             )
                         } else {
                             format!(
-                                "  \u{2191}/\u{2193}: navigate  \u{2325}\u{23ce}: done  Space: new  Enter: edit  \u{2325}X: select  Del: delete  \u{2325}M: move  type: search{}",
+                                "  j/k: navigate  Space: done  a: new  e: edit  x: select  m: move  /: search{}",
                                 filter_indicator
                             )
                         }
@@ -778,10 +792,11 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                             .get(*li)
                             .map(|l| l.name.as_str())
                             .unwrap_or("?");
+                        let style = Style::default().fg(Color::Cyan);
                         let style = if is_selected {
-                            Style::default().fg(Color::Cyan).bg(Color::DarkGray)
+                            style.add_modifier(Modifier::REVERSED)
                         } else {
-                            Style::default().fg(Color::Cyan)
+                            style
                         };
                         ListItem::new(Line::from(Span::styled(format!("  # {}", name), style)))
                     }
@@ -815,24 +830,24 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
                         } else {
                             ("  ? (deleted)".to_string(), false)
                         };
-                        let style = if is_done {
-                            if is_selected {
-                                Style::default().fg(Color::Gray).bg(Color::DarkGray)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            }
-                        } else if is_selected {
-                            Style::default().bg(Color::DarkGray)
+                        let base_style = if is_done {
+                            Style::default().fg(Color::DarkGray)
                         } else {
                             Style::default()
+                        };
+                        let style = if is_selected {
+                            base_style.add_modifier(Modifier::REVERSED)
+                        } else {
+                            base_style
                         };
                         ListItem::new(Line::from(Span::styled(text, style)))
                     }
                     SearchResult::Tag(name) => {
+                        let style = Style::default().fg(Color::Blue);
                         let style = if is_selected {
-                            Style::default().fg(Color::Blue).bg(Color::DarkGray)
+                            style.add_modifier(Modifier::REVERSED)
                         } else {
-                            Style::default().fg(Color::Blue)
+                            style
                         };
                         ListItem::new(Line::from(Span::styled(format!("  @ {}", name), style)))
                     }
@@ -846,7 +861,7 @@ fn render_search_modal(app: &App, frame: &mut Frame) {
 }
 
 pub fn render_help(frame: &mut Frame, key_config: &KeyConfig) {
-    let area = centered_rect(65, 38, frame.area());
+    let area = centered_rect(65, 39, frame.area());
 
     frame.render_widget(Clear, area);
 
@@ -884,7 +899,11 @@ pub fn render_help(frame: &mut Frame, key_config: &KeyConfig) {
             &key_pair(&[n], &Action::MoveUp, &Action::MoveDown),
             "Move up / down",
         ),
-        help_row(&key(&[n], &Action::TogglePane), "Switch pane"),
+        help_row(&key(&[n], &Action::TogglePane), "Toggle pane"),
+        help_row(
+            &key_pair(&[n], &Action::SwitchToSidebar, &Action::SwitchToMain),
+            "Switch to sidebar / main",
+        ),
         help_row(
             &key_pair(&[n], &Action::JumpToFirst, &Action::JumpToLast),
             "Jump to first / last",
@@ -942,7 +961,7 @@ pub fn render_help(frame: &mut Frame, key_config: &KeyConfig) {
         help_row(&key(&[s], &Action::DeleteList), "Delete list (sidebar)"),
         Line::from(""),
         section("General"),
-        help_row("Type any character", "Search"),
+        help_row(&key(&[n], &Action::StartSearch), "Search"),
         help_row(&key(&[n], &Action::SwitchContext), "Switch context"),
         help_row(&key(&[n], &Action::Undo), "Undo"),
         help_row(&key(&[n], &Action::Redo), "Redo"),
@@ -981,6 +1000,7 @@ fn render_focus_overlay(app: &App, frame: &mut Frame) {
         time_secs: 0,
         list_id: None,
         position: 0.0,
+        archived: false,
     };
     let item = app
         .focus_item_id
@@ -1075,7 +1095,7 @@ fn render_filter_modal(app: &App, frame: &mut Frame) {
             let checkbox = if checked { "[x]" } else { "[ ]" };
             let is_selected = i == app.filter_cursor;
             let style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
@@ -1139,7 +1159,7 @@ fn render_move_to_list_modal(app: &App, frame: &mut Frame) {
             .map(|(i, (_, name))| {
                 let is_selected = i == app.move_to_list_cursor;
                 let style = if is_selected {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default().add_modifier(Modifier::REVERSED)
                 } else {
                     Style::default()
                 };
@@ -1198,7 +1218,7 @@ fn render_context_modal(app: &App, frame: &mut Frame) {
             let is_selected = i == app.context_cursor;
             let display = name.clone();
             let style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().add_modifier(Modifier::REVERSED)
             } else {
                 Style::default()
             };
@@ -1208,10 +1228,11 @@ fn render_context_modal(app: &App, frame: &mut Frame) {
 
     let new_idx = targets.len();
     let is_new_selected = app.context_cursor == new_idx;
+    let new_style = Style::default().fg(Color::Green);
     let new_style = if is_new_selected {
-        Style::default().fg(Color::Green).bg(Color::DarkGray)
+        new_style.add_modifier(Modifier::REVERSED)
     } else {
-        Style::default().fg(Color::Green)
+        new_style
     };
     items.push(ListItem::new(Line::from(Span::styled(
         "  + New context...",
@@ -1251,7 +1272,9 @@ fn render_autocomplete_dropdown(app: &App, frame: &mut Frame) {
         .map(|(i, tag)| {
             let is_selected = i == app.autocomplete_cursor;
             let style = if is_selected {
-                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::REVERSED)
             } else {
                 Style::default().fg(Color::White).bg(Color::Black)
             };

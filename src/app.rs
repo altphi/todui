@@ -48,6 +48,11 @@ pub struct App {
     pub context_filter: String,
     pub key_config: KeyConfig,
     dirty: bool,
+    needs_full_reconcile: bool,
+    sync_handle: Option<crate::sync_transport::SyncHandle>,
+    pub sync_connected: bool,
+    sync_backed_up: bool,
+    pub pane_switch_at: Option<Instant>,
 }
 
 impl App {
@@ -91,12 +96,27 @@ impl App {
             move_to_list_filter: String::new(),
             sidebar_entries: Vec::new(),
             selected_sidebar_index: 0,
-            current_context: context,
+            current_context: context.clone(),
             context_cursor: 0,
             context_filter: String::new(),
             key_config,
             dirty: false,
+            needs_full_reconcile: false,
+            sync_handle: None,
+            sync_connected: false,
+            sync_backed_up: false,
+            pane_switch_at: None,
         };
+
+        if let Some(config) = crate::sync_auth::load_config() {
+            let handle = crate::sync_transport::start_sync_thread(
+                config.server_url,
+                config.token,
+                context.clone(),
+            );
+            app.sync_handle = Some(handle);
+        }
+
         app.rebuild_sidebar_entries();
         Ok(app)
     }
@@ -104,6 +124,7 @@ impl App {
     #[cfg(test)]
     pub fn with_lists(lists: Vec<TodoList>) -> Self {
         let doc = crate::crdt::migrate_from_lists(&lists);
+        let data_dir = tempfile::tempdir().expect("failed to create temp dir");
         let mut app = Self {
             auto_doc: AutoCommit::new(),
             doc,
@@ -115,7 +136,7 @@ impl App {
             input_cursor: 0,
             show_done: true,
             running: true,
-            data_dir: PathBuf::from("/tmp/todui-test"),
+            data_dir: data_dir.keep(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             search_results: Vec::new(),
@@ -141,6 +162,11 @@ impl App {
             context_filter: String::new(),
             key_config: KeyConfig::default(),
             dirty: false,
+            needs_full_reconcile: false,
+            sync_handle: None,
+            sync_connected: false,
+            sync_backed_up: false,
+            pane_switch_at: None,
         };
         app.rebuild_sidebar_entries();
         app
@@ -171,6 +197,10 @@ impl App {
 
     pub fn switch_context(&mut self, name: &str) {
         self.flush();
+        self.shutdown_sync();
+        self.sync_handle = None;
+        self.sync_backed_up = false;
+
         self.current_context = name.to_string();
         let (auto_doc, doc) = crate::crdt::load_context_document(&self.context_dir())
             .unwrap_or_else(|_| {
@@ -197,6 +227,14 @@ impl App {
         self.rebuild_sidebar_entries();
         let _ = storage::save_last_context(&self.data_dir, name);
         self.input_mode = InputMode::Normal;
+
+        if let Some(config) = crate::sync_auth::load_config() {
+            self.sync_handle = Some(crate::sync_transport::start_sync_thread(
+                config.server_url,
+                config.token,
+                name.to_string(),
+            ));
+        }
     }
 
     pub fn create_context(&mut self, name: String) {
@@ -278,6 +316,7 @@ impl App {
             self.redo_stack.push(self.snapshot());
             self.restore_snapshot(snap);
             self.selected_items.clear();
+            self.save_doc();
         }
     }
 
@@ -286,6 +325,7 @@ impl App {
             self.undo_stack.push(self.snapshot());
             self.restore_snapshot(snap);
             self.selected_items.clear();
+            self.save_doc();
         }
     }
 
@@ -510,6 +550,23 @@ impl App {
             Pane::Main => Pane::Sidebar,
         };
         self.selected_items.clear();
+        self.pane_switch_at = Some(Instant::now());
+    }
+
+    pub fn switch_to_sidebar(&mut self) {
+        if self.active_pane != Pane::Sidebar {
+            self.active_pane = Pane::Sidebar;
+            self.selected_items.clear();
+            self.pane_switch_at = Some(Instant::now());
+        }
+    }
+
+    pub fn switch_to_main(&mut self) {
+        if self.active_pane != Pane::Main {
+            self.active_pane = Pane::Main;
+            self.selected_items.clear();
+            self.pane_switch_at = Some(Instant::now());
+        }
     }
 
     pub fn move_selection_up(&mut self) {
@@ -670,6 +727,7 @@ impl App {
                 }
             }
         };
+        let inserted_above_selection = self.resolve_selected_item().is_some();
         let item = CrdtItem {
             id: crate::crdt::new_id(),
             title: clean_title,
@@ -678,8 +736,12 @@ impl App {
             time_secs: 0,
             list_id,
             position,
+            archived: false,
         };
         self.doc.items.insert(item.id.clone(), item);
+        if inserted_above_selection {
+            self.selected_item_index += 1;
+        }
         self.rebuild_sidebar_entries();
         self.save_doc();
     }
@@ -719,13 +781,26 @@ impl App {
         if vi > 0 && vi < visible.len() {
             let cur_id = visible[vi].0.to_string();
             let prev_id = visible[vi - 1].0.to_string();
+            let cur_pos = match self.doc.items.get(&cur_id) {
+                Some(item) => item.position,
+                None => return,
+            };
+            let prev_pos = match self.doc.items.get(&prev_id) {
+                Some(item) => item.position,
+                None => return,
+            };
             self.push_undo();
-            let cur_pos = self.doc.items[&cur_id].position;
-            let prev_pos = self.doc.items[&prev_id].position;
-            self.doc.items.get_mut(&cur_id).unwrap().position = prev_pos;
-            self.doc.items.get_mut(&prev_id).unwrap().position = cur_pos;
+            let (new_cur, new_prev) = if cur_pos == prev_pos {
+                (prev_pos - 1.0, prev_pos)
+            } else {
+                (prev_pos, cur_pos)
+            };
+            self.doc.items.get_mut(&cur_id).unwrap().position = new_cur;
+            self.doc.items.get_mut(&prev_id).unwrap().position = new_prev;
+            self.put_auto_doc_item_position(&cur_id, new_cur);
+            self.put_auto_doc_item_position(&prev_id, new_prev);
             self.selected_item_index -= 1;
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -738,13 +813,26 @@ impl App {
         if vi + 1 < visible.len() {
             let cur_id = visible[vi].0.to_string();
             let next_id = visible[vi + 1].0.to_string();
+            let cur_pos = match self.doc.items.get(&cur_id) {
+                Some(item) => item.position,
+                None => return,
+            };
+            let next_pos = match self.doc.items.get(&next_id) {
+                Some(item) => item.position,
+                None => return,
+            };
             self.push_undo();
-            let cur_pos = self.doc.items[&cur_id].position;
-            let next_pos = self.doc.items[&next_id].position;
-            self.doc.items.get_mut(&cur_id).unwrap().position = next_pos;
-            self.doc.items.get_mut(&next_id).unwrap().position = cur_pos;
+            let (new_cur, new_next) = if cur_pos == next_pos {
+                (next_pos + 1.0, next_pos)
+            } else {
+                (next_pos, cur_pos)
+            };
+            self.doc.items.get_mut(&cur_id).unwrap().position = new_cur;
+            self.doc.items.get_mut(&next_id).unwrap().position = new_next;
+            self.put_auto_doc_item_position(&cur_id, new_cur);
+            self.put_auto_doc_item_position(&next_id, new_next);
             self.selected_item_index += 1;
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -762,9 +850,15 @@ impl App {
                 .fold(f64::INFINITY, f64::min);
             drop(visible);
             self.push_undo();
-            self.doc.items.get_mut(&cur_id).unwrap().position = min_pos - 1.0;
+            let new_pos = min_pos - 1.0;
+            if let Some(item) = self.doc.items.get_mut(&cur_id) {
+                item.position = new_pos;
+            } else {
+                return;
+            }
+            self.put_auto_doc_item_position(&cur_id, new_pos);
             self.selected_item_index = 0;
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -787,12 +881,18 @@ impl App {
                 .fold(f64::NEG_INFINITY, f64::max);
             drop(visible);
             self.push_undo();
-            self.doc.items.get_mut(&cur_id).unwrap().position = max_pos + 1.0;
+            let new_pos = max_pos + 1.0;
+            if let Some(item) = self.doc.items.get_mut(&cur_id) {
+                item.position = new_pos;
+            } else {
+                return;
+            }
+            self.put_auto_doc_item_position(&cur_id, new_pos);
             let new_visible = self.visible_items();
             if let Some(new_vi) = new_visible.iter().position(|(id, _)| *id == cur_id) {
                 self.selected_item_index = new_vi;
             }
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -1100,15 +1200,28 @@ impl App {
         if self.selected_list_index > 0 && self.selected_list_index < lists.len() {
             let cur_id = lists[self.selected_list_index].id.clone();
             let prev_id = lists[self.selected_list_index - 1].id.clone();
+            let cur_pos = match self.doc.lists.get(&cur_id) {
+                Some(l) => l.position,
+                None => return,
+            };
+            let prev_pos = match self.doc.lists.get(&prev_id) {
+                Some(l) => l.position,
+                None => return,
+            };
             self.push_undo();
-            let cur_pos = self.doc.lists[&cur_id].position;
-            let prev_pos = self.doc.lists[&prev_id].position;
-            self.doc.lists.get_mut(&cur_id).unwrap().position = prev_pos;
-            self.doc.lists.get_mut(&prev_id).unwrap().position = cur_pos;
+            let (new_cur, new_prev) = if cur_pos == prev_pos {
+                (prev_pos - 1.0, prev_pos)
+            } else {
+                (prev_pos, cur_pos)
+            };
+            self.doc.lists.get_mut(&cur_id).unwrap().position = new_cur;
+            self.doc.lists.get_mut(&prev_id).unwrap().position = new_prev;
+            self.put_auto_doc_list_position(&cur_id, new_cur);
+            self.put_auto_doc_list_position(&prev_id, new_prev);
             self.selected_list_index -= 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -1117,15 +1230,28 @@ impl App {
         if self.selected_list_index + 1 < lists.len() {
             let cur_id = lists[self.selected_list_index].id.clone();
             let next_id = lists[self.selected_list_index + 1].id.clone();
+            let cur_pos = match self.doc.lists.get(&cur_id) {
+                Some(l) => l.position,
+                None => return,
+            };
+            let next_pos = match self.doc.lists.get(&next_id) {
+                Some(l) => l.position,
+                None => return,
+            };
             self.push_undo();
-            let cur_pos = self.doc.lists[&cur_id].position;
-            let next_pos = self.doc.lists[&next_id].position;
-            self.doc.lists.get_mut(&cur_id).unwrap().position = next_pos;
-            self.doc.lists.get_mut(&next_id).unwrap().position = cur_pos;
+            let (new_cur, new_next) = if cur_pos == next_pos {
+                (next_pos + 1.0, next_pos)
+            } else {
+                (next_pos, cur_pos)
+            };
+            self.doc.lists.get_mut(&cur_id).unwrap().position = new_cur;
+            self.doc.lists.get_mut(&next_id).unwrap().position = new_next;
+            self.put_auto_doc_list_position(&cur_id, new_cur);
+            self.put_auto_doc_list_position(&next_id, new_next);
             self.selected_list_index += 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -1139,11 +1265,17 @@ impl App {
                 .fold(f64::INFINITY, f64::min);
             drop(lists);
             self.push_undo();
-            self.doc.lists.get_mut(&cur_id).unwrap().position = min_pos - 1.0;
+            let new_pos = min_pos - 1.0;
+            if let Some(list) = self.doc.lists.get_mut(&cur_id) {
+                list.position = new_pos;
+            } else {
+                return;
+            }
+            self.put_auto_doc_list_position(&cur_id, new_pos);
             self.selected_list_index = 0;
             self.selected_sidebar_index = 0;
             self.rebuild_sidebar_entries();
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -1157,11 +1289,17 @@ impl App {
                 .fold(f64::NEG_INFINITY, f64::max);
             drop(lists);
             self.push_undo();
-            self.doc.lists.get_mut(&cur_id).unwrap().position = max_pos + 1.0;
+            let new_pos = max_pos + 1.0;
+            if let Some(list) = self.doc.lists.get_mut(&cur_id) {
+                list.position = new_pos;
+            } else {
+                return;
+            }
+            self.put_auto_doc_list_position(&cur_id, new_pos);
             self.selected_list_index = self.doc.ordered_lists().len() - 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
-            self.save_doc();
+            self.dirty = true;
         }
     }
 
@@ -1435,36 +1573,21 @@ impl App {
             Some(id) => id,
             None => return,
         };
-        let list_name = match self.doc.lists.get(&list_id) {
-            Some(l) => l.name.clone(),
-            None => return,
-        };
-        let done_items: Vec<crate::model::TodoItem> = self
-            .doc
-            .items_for_list(&list_id)
-            .iter()
-            .filter(|item| item.done)
-            .map(|item| crate::model::TodoItem {
-                title: item.title.clone(),
-                done: item.done,
-                tags: item.tags.clone(),
-                time_secs: item.time_secs,
-            })
-            .collect();
-        if done_items.is_empty() {
-            return;
-        }
-        self.push_undo();
-        let _ = storage::append_to_archive(&self.context_dir(), &list_name, &done_items);
-        let ids_to_remove: Vec<String> = self
+        let ids_to_archive: Vec<String> = self
             .doc
             .items
             .values()
             .filter(|item| item.list_id.as_deref() == Some(&list_id) && item.done)
             .map(|item| item.id.clone())
             .collect();
-        for id in ids_to_remove {
-            self.doc.items.remove(&id);
+        if ids_to_archive.is_empty() {
+            return;
+        }
+        self.push_undo();
+        for id in &ids_to_archive {
+            if let Some(item) = self.doc.items.get_mut(id) {
+                item.archived = true;
+            }
         }
         self.selected_items.clear();
         self.rebuild_sidebar_entries();
@@ -1584,20 +1707,131 @@ impl App {
 
     fn save_doc(&mut self) {
         self.dirty = true;
+        self.needs_full_reconcile = true;
+    }
+
+    fn put_auto_doc_item_position(&mut self, item_id: &str, position: f64) {
+        use automerge::{ROOT, ReadDoc, transaction::Transactable};
+        if let Ok(Some((_, items_obj))) = self.auto_doc.get(ROOT, "items")
+            && let Ok(Some((_, item_obj))) = self.auto_doc.get(&items_obj, item_id)
+        {
+            let _ = self.auto_doc.put(&item_obj, "position", position);
+        }
+    }
+
+    fn put_auto_doc_list_position(&mut self, list_id: &str, position: f64) {
+        use automerge::{ROOT, ReadDoc, transaction::Transactable};
+        if let Ok(Some((_, lists_obj))) = self.auto_doc.get(ROOT, "lists")
+            && let Ok(Some((_, list_obj))) = self.auto_doc.get(&lists_obj, list_id)
+        {
+            let _ = self.auto_doc.put(&list_obj, "position", position);
+        }
     }
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
+    pub fn has_sync(&self) -> bool {
+        self.sync_handle.is_some()
+    }
+
     pub fn flush(&mut self) {
         if self.dirty {
-            let _ = crate::crdt::save_context_document(
-                &self.context_dir(),
-                &mut self.auto_doc,
-                &self.doc,
-            );
+            if self.needs_full_reconcile {
+                let _ = autosurgeon::reconcile(&mut self.auto_doc, &self.doc);
+                self.needs_full_reconcile = false;
+            }
+            let bytes = self.auto_doc.save();
+            let automerge_path = self.context_dir().join("todui.automerge");
+            let tmp_path = self.context_dir().join("todui.automerge.tmp");
+            if std::fs::write(&tmp_path, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &automerge_path);
+            }
             self.dirty = false;
+            if let Some(handle) = &self.sync_handle {
+                let _ = handle
+                    .command_tx
+                    .send(crate::sync_transport::SyncCommand::SendMessage(bytes));
+            }
+        }
+    }
+
+    pub fn send_document(&mut self) {
+        if let Some(handle) = &self.sync_handle {
+            let bytes = self.auto_doc.save();
+            let _ = handle
+                .command_tx
+                .send(crate::sync_transport::SyncCommand::SendMessage(bytes));
+        }
+    }
+
+    pub fn receive_sync_messages(&mut self) -> bool {
+        let mut changed = false;
+
+        let Some(handle) = &self.sync_handle else {
+            return false;
+        };
+
+        let mut events = Vec::new();
+        while let Ok(event) = handle.event_rx.try_recv() {
+            events.push(event);
+        }
+
+        if !events.is_empty() && self.needs_full_reconcile {
+            let _ = autosurgeon::reconcile(&mut self.auto_doc, &self.doc);
+            self.needs_full_reconcile = false;
+        }
+
+        for event in events {
+            match event {
+                crate::sync_transport::SyncEvent::MessageReceived(bytes) => {
+                    if let Ok(mut server_doc) = AutoCommit::load(&bytes)
+                        && server_doc.merge(&mut self.auto_doc).is_ok()
+                        && let Ok(new_doc) =
+                            autosurgeon::hydrate::<_, crate::crdt::CrdtDocument>(&server_doc)
+                    {
+                        self.backup_before_sync();
+                        self.auto_doc = server_doc;
+                        self.doc = new_doc;
+                        changed = true;
+                    }
+                }
+                crate::sync_transport::SyncEvent::Connected => {
+                    self.sync_connected = true;
+                    self.send_document();
+                }
+                crate::sync_transport::SyncEvent::Disconnected => {
+                    self.sync_connected = false;
+                }
+            }
+        }
+
+        if changed {
+            self.rebuild_sidebar_entries();
+            self.dirty = true;
+        }
+
+        changed
+    }
+
+    fn backup_before_sync(&mut self) {
+        if self.sync_backed_up {
+            return;
+        }
+        let source_path = self.context_dir().join("todui.automerge");
+        if source_path.exists() {
+            let backup_path = self.context_dir().join("todui.automerge.bak");
+            let _ = std::fs::copy(&source_path, &backup_path);
+        }
+        self.sync_backed_up = true;
+    }
+
+    pub fn shutdown_sync(&mut self) {
+        if let Some(handle) = &self.sync_handle {
+            let _ = handle
+                .command_tx
+                .send(crate::sync_transport::SyncCommand::Shutdown);
         }
     }
 
@@ -1628,9 +1862,12 @@ impl App {
             .map(|l| l.id.clone())
             .collect();
         for list_id in list_ids {
-            let needs_reset = match &self.doc.lists[&list_id].last_reset {
-                None => true,
-                Some(date) => date.as_str() < today.as_str(),
+            let needs_reset = match self.doc.lists.get(&list_id) {
+                Some(list) => match &list.last_reset {
+                    None => true,
+                    Some(date) => date.as_str() < today.as_str(),
+                },
+                None => continue,
             };
             if !needs_reset {
                 continue;
@@ -1649,7 +1886,9 @@ impl App {
             });
             let done_item_ids: Vec<String> = done_items.into_iter().map(|(id, _)| id).collect();
             if done_item_ids.is_empty() {
-                self.doc.lists.get_mut(&list_id).unwrap().last_reset = Some(today.clone());
+                if let Some(list) = self.doc.lists.get_mut(&list_id) {
+                    list.last_reset = Some(today.clone());
+                }
                 continue;
             }
             let max_pos = self.doc.next_position_for_list(&list_id);
@@ -1660,7 +1899,9 @@ impl App {
                     item.position = max_pos + offset as f64;
                 }
             }
-            self.doc.lists.get_mut(&list_id).unwrap().last_reset = Some(today.clone());
+            if let Some(list) = self.doc.lists.get_mut(&list_id) {
+                list.last_reset = Some(today.clone());
+            }
         }
         self.rebuild_sidebar_entries();
         self.save_doc();
@@ -1668,6 +1909,7 @@ impl App {
 
     pub fn quit(&mut self) {
         self.flush();
+        self.shutdown_sync();
         self.running = false;
     }
 }
@@ -1805,6 +2047,24 @@ mod tests {
         assert_eq!(added.title, "New task");
         assert_eq!(added.tags, vec!["urgent", "work"]);
         assert!(!added.done);
+    }
+
+    #[test]
+    fn test_add_todo_adjusts_selection_index() {
+        let mut app = sample_app();
+        app.selected_item_index = 1;
+        let original_id = app.resolve_selected_item().unwrap();
+        let original_title = app.doc.items.get(&original_id).unwrap().title.clone();
+
+        app.add_todo("Inserted item".to_string());
+
+        let after_id = app.resolve_selected_item().unwrap();
+        let after_title = app.doc.items.get(&after_id).unwrap().title.clone();
+        assert_eq!(
+            original_title, after_title,
+            "selection should stay on original item after add"
+        );
+        assert_eq!(app.selected_item_index, 2);
     }
 
     #[test]
@@ -3570,6 +3830,7 @@ mod tests {
             time_secs: 0,
             list_id: None,
             position: 0.0,
+            archived: false,
         };
         app.doc.items.insert(item.id.clone(), item);
         app.rebuild_sidebar_entries();
@@ -3773,7 +4034,7 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_done_items_removes_done() {
+    fn test_archive_done_items_archives_done() {
         let mut list = TodoList::new("Work");
         list.items.push(TodoItem::new("Keep this"));
         let mut done1 = TodoItem::new("Done 1");
@@ -3790,6 +4051,9 @@ mod tests {
 
         assert_eq!(app.items_for_nth_list(0).len(), 1);
         assert_eq!(app.items_for_nth_list(0)[0].title, "Keep this");
+        assert_eq!(app.doc.items.len(), 3);
+        let archived: Vec<_> = app.doc.items.values().filter(|i| i.archived).collect();
+        assert_eq!(archived.len(), 2);
     }
 
     #[test]
@@ -3883,5 +4147,66 @@ mod tests {
         assert_eq!(app.items_for_nth_list(0)[0].tags, vec!["focus"]);
         app.undo();
         assert!(app.items_for_nth_list(0)[0].tags.is_empty());
+    }
+
+    #[test]
+    fn test_switch_context_resets_sync_backed_up() {
+        let mut app = App::with_lists(vec![]);
+        app.sync_backed_up = true;
+        app.switch_context("other");
+        assert!(!app.sync_backed_up);
+    }
+
+    #[test]
+    fn test_move_todo_with_duplicate_positions() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem {
+            title: "A".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "B".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "C".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+
+        // Give all three items the same position (simulates sync collision)
+        app.set_item_field(0, 0, |item| item.position = 1.0);
+        app.set_item_field(0, 1, |item| item.position = 1.0);
+        app.set_item_field(0, 2, |item| item.position = 1.0);
+
+        // Visible order is by position then id tiebreak
+        let titles_before: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        let first = titles_before[0].clone();
+        let second = titles_before[1].clone();
+
+        // Select second item and move it up
+        app.selected_item_index = 1;
+        app.move_todo_up();
+
+        let titles_after: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        // The first two items should have swapped
+        assert_eq!(titles_after[0], second);
+        assert_eq!(titles_after[1], first);
+        assert_eq!(app.selected_item_index, 0);
     }
 }

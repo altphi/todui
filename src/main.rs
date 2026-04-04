@@ -4,6 +4,8 @@ mod crdt;
 mod input;
 mod model;
 mod storage;
+mod sync_auth;
+mod sync_transport;
 mod ui;
 
 use std::path::PathBuf;
@@ -15,6 +17,17 @@ use ratatui::DefaultTerminal;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.contains(&"--login".into()) {
+        return handle_login();
+    }
+    if args.contains(&"--logout".into()) {
+        sync_auth::clear_config().ok();
+        println!("Logged out.");
+        return Ok(());
+    }
 
     let (data_dir, ascii_mode) = parse_args();
 
@@ -80,6 +93,8 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut Str
             app.reset_daily_lists();
         }
 
+        let sync_changed = app.receive_sync_messages();
+
         terminal.draw(|frame| {
             ui::render(app, frame);
             if show_help {
@@ -89,7 +104,7 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut Str
 
         let timeout = if app.input_mode == model::InputMode::Focused {
             Duration::from_millis(250)
-        } else if app.is_dirty() {
+        } else if app.is_dirty() || sync_changed || app.has_sync() {
             Duration::from_millis(500)
         } else {
             Duration::from_secs(60)
@@ -123,4 +138,80 @@ fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut Str
     }
 
     Ok(())
+}
+
+fn handle_login() -> color_eyre::Result<()> {
+    use std::io::Write;
+
+    print!("Server URL: ");
+    std::io::stdout().flush()?;
+    let mut server_url = String::new();
+    std::io::stdin().read_line(&mut server_url)?;
+    let server_url = server_url.trim().to_string();
+    if server_url.is_empty() {
+        eprintln!("Server URL is required.");
+        std::process::exit(1);
+    }
+
+    print!("Email: ");
+    std::io::stdout().flush()?;
+    let mut email = String::new();
+    std::io::stdin().read_line(&mut email)?;
+    let email = email.trim().to_string();
+    if email.is_empty() {
+        eprintln!("Email is required.");
+        std::process::exit(1);
+    }
+
+    println!("Sending magic link to {}...", email);
+
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(format!("{}/auth/login", server_url))
+        .json(&serde_json::json!({ "email": email }))
+        .send()?;
+
+    if !resp.status().is_success() {
+        eprintln!("Error: {}", resp.text()?);
+        std::process::exit(1);
+    }
+
+    let body: serde_json::Value = resp.json()?;
+    let poll_id = body["poll_id"]
+        .as_str()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Invalid response: missing poll_id"))?;
+
+    println!("Check your email and click the login link. Waiting...");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let resp = client
+            .get(format!("{}/auth/poll?poll_id={}", server_url, poll_id))
+            .send()?;
+        let body: serde_json::Value = resp.json()?;
+
+        match body["status"].as_str() {
+            Some("verified") => {
+                let token = body["token"]
+                    .as_str()
+                    .ok_or_else(|| color_eyre::eyre::eyre!("Invalid response: missing token"))?
+                    .to_string();
+                let config = sync_auth::SyncConfig {
+                    server_url,
+                    token,
+                    email,
+                };
+                sync_auth::save_config(&config)?;
+                println!("Logged in successfully!");
+                return Ok(());
+            }
+            Some("expired") => {
+                eprintln!("Login link expired. Please try again.");
+                std::process::exit(1);
+            }
+            _ => {
+                // Still pending, continue polling
+            }
+        }
+    }
 }
