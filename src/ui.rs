@@ -411,10 +411,10 @@ fn render_todo_pane(app: &App, frame: &mut Frame, area: Rect) {
             if !app.show_done {
                 "All items completed. Press Alt+Shift+D to hide/show."
             } else {
-                "No items. Press <space> to add one."
+                "No items. Press `a` to add one."
             }
         } else {
-            "No items. Press <space> to add one."
+            "No items. Press `a` to add one."
         };
         let hint_paragraph = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint_paragraph, inner);

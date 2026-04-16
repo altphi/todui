@@ -772,10 +772,30 @@ impl App {
         }
     }
 
+    fn renumber_item_positions_for_list(&mut self, list_id: &str) {
+        let ids: Vec<String> = self
+            .doc
+            .items_for_list(list_id)
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            let new_pos = i as f64;
+            if let Some(item) = self.doc.items.get_mut(id) {
+                item.position = new_pos;
+            }
+            self.put_auto_doc_item_position(id, new_pos);
+        }
+    }
+
     pub fn move_todo_up(&mut self) {
         if self.is_virtual_view() {
             return;
         }
+        let list_id = match self.selected_list_id() {
+            Some(id) => id,
+            None => return,
+        };
         let visible = self.visible_items();
         let vi = self.selected_item_index;
         if vi > 0 && vi < visible.len() {
@@ -789,16 +809,27 @@ impl App {
                 Some(item) => item.position,
                 None => return,
             };
+            drop(visible);
             self.push_undo();
-            let (new_cur, new_prev) = if cur_pos == prev_pos {
-                (prev_pos - 1.0, prev_pos)
-            } else {
-                (prev_pos, cur_pos)
+            if cur_pos == prev_pos {
+                self.renumber_item_positions_for_list(&list_id);
+            }
+            let cur_pos = match self.doc.items.get(&cur_id) {
+                Some(item) => item.position,
+                None => return,
             };
-            self.doc.items.get_mut(&cur_id).unwrap().position = new_cur;
-            self.doc.items.get_mut(&prev_id).unwrap().position = new_prev;
-            self.put_auto_doc_item_position(&cur_id, new_cur);
-            self.put_auto_doc_item_position(&prev_id, new_prev);
+            let prev_pos = match self.doc.items.get(&prev_id) {
+                Some(item) => item.position,
+                None => return,
+            };
+            if let Some(item) = self.doc.items.get_mut(&cur_id) {
+                item.position = prev_pos;
+            }
+            if let Some(item) = self.doc.items.get_mut(&prev_id) {
+                item.position = cur_pos;
+            }
+            self.put_auto_doc_item_position(&cur_id, prev_pos);
+            self.put_auto_doc_item_position(&prev_id, cur_pos);
             self.selected_item_index -= 1;
             self.dirty = true;
         }
@@ -808,6 +839,10 @@ impl App {
         if self.is_virtual_view() {
             return;
         }
+        let list_id = match self.selected_list_id() {
+            Some(id) => id,
+            None => return,
+        };
         let visible = self.visible_items();
         let vi = self.selected_item_index;
         if vi + 1 < visible.len() {
@@ -821,16 +856,27 @@ impl App {
                 Some(item) => item.position,
                 None => return,
             };
+            drop(visible);
             self.push_undo();
-            let (new_cur, new_next) = if cur_pos == next_pos {
-                (next_pos + 1.0, next_pos)
-            } else {
-                (next_pos, cur_pos)
+            if cur_pos == next_pos {
+                self.renumber_item_positions_for_list(&list_id);
+            }
+            let cur_pos = match self.doc.items.get(&cur_id) {
+                Some(item) => item.position,
+                None => return,
             };
-            self.doc.items.get_mut(&cur_id).unwrap().position = new_cur;
-            self.doc.items.get_mut(&next_id).unwrap().position = new_next;
-            self.put_auto_doc_item_position(&cur_id, new_cur);
-            self.put_auto_doc_item_position(&next_id, new_next);
+            let next_pos = match self.doc.items.get(&next_id) {
+                Some(item) => item.position,
+                None => return,
+            };
+            if let Some(item) = self.doc.items.get_mut(&cur_id) {
+                item.position = next_pos;
+            }
+            if let Some(item) = self.doc.items.get_mut(&next_id) {
+                item.position = cur_pos;
+            }
+            self.put_auto_doc_item_position(&cur_id, next_pos);
+            self.put_auto_doc_item_position(&next_id, cur_pos);
             self.selected_item_index += 1;
             self.dirty = true;
         }
@@ -1195,6 +1241,22 @@ impl App {
         }
     }
 
+    fn renumber_list_positions(&mut self) {
+        let ids: Vec<String> = self
+            .doc
+            .ordered_lists()
+            .iter()
+            .map(|list| list.id.clone())
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            let new_pos = i as f64;
+            if let Some(list) = self.doc.lists.get_mut(id) {
+                list.position = new_pos;
+            }
+            self.put_auto_doc_list_position(id, new_pos);
+        }
+    }
+
     pub fn move_list_up(&mut self) {
         let lists = self.doc.ordered_lists();
         if self.selected_list_index > 0 && self.selected_list_index < lists.len() {
@@ -1208,16 +1270,27 @@ impl App {
                 Some(l) => l.position,
                 None => return,
             };
+            drop(lists);
             self.push_undo();
-            let (new_cur, new_prev) = if cur_pos == prev_pos {
-                (prev_pos - 1.0, prev_pos)
-            } else {
-                (prev_pos, cur_pos)
+            if cur_pos == prev_pos {
+                self.renumber_list_positions();
+            }
+            let cur_pos = match self.doc.lists.get(&cur_id) {
+                Some(l) => l.position,
+                None => return,
             };
-            self.doc.lists.get_mut(&cur_id).unwrap().position = new_cur;
-            self.doc.lists.get_mut(&prev_id).unwrap().position = new_prev;
-            self.put_auto_doc_list_position(&cur_id, new_cur);
-            self.put_auto_doc_list_position(&prev_id, new_prev);
+            let prev_pos = match self.doc.lists.get(&prev_id) {
+                Some(l) => l.position,
+                None => return,
+            };
+            if let Some(list) = self.doc.lists.get_mut(&cur_id) {
+                list.position = prev_pos;
+            }
+            if let Some(list) = self.doc.lists.get_mut(&prev_id) {
+                list.position = cur_pos;
+            }
+            self.put_auto_doc_list_position(&cur_id, prev_pos);
+            self.put_auto_doc_list_position(&prev_id, cur_pos);
             self.selected_list_index -= 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
@@ -1238,16 +1311,27 @@ impl App {
                 Some(l) => l.position,
                 None => return,
             };
+            drop(lists);
             self.push_undo();
-            let (new_cur, new_next) = if cur_pos == next_pos {
-                (next_pos + 1.0, next_pos)
-            } else {
-                (next_pos, cur_pos)
+            if cur_pos == next_pos {
+                self.renumber_list_positions();
+            }
+            let cur_pos = match self.doc.lists.get(&cur_id) {
+                Some(l) => l.position,
+                None => return,
             };
-            self.doc.lists.get_mut(&cur_id).unwrap().position = new_cur;
-            self.doc.lists.get_mut(&next_id).unwrap().position = new_next;
-            self.put_auto_doc_list_position(&cur_id, new_cur);
-            self.put_auto_doc_list_position(&next_id, new_next);
+            let next_pos = match self.doc.lists.get(&next_id) {
+                Some(l) => l.position,
+                None => return,
+            };
+            if let Some(list) = self.doc.lists.get_mut(&cur_id) {
+                list.position = next_pos;
+            }
+            if let Some(list) = self.doc.lists.get_mut(&next_id) {
+                list.position = cur_pos;
+            }
+            self.put_auto_doc_list_position(&cur_id, next_pos);
+            self.put_auto_doc_list_position(&next_id, cur_pos);
             self.selected_list_index += 1;
             self.selected_sidebar_index = self.selected_list_index;
             self.rebuild_sidebar_entries();
@@ -4208,5 +4292,107 @@ mod tests {
         assert_eq!(titles_after[0], second);
         assert_eq!(titles_after[1], first);
         assert_eq!(app.selected_item_index, 0);
+    }
+
+    #[test]
+    fn test_move_todo_up_three_duplicate_positions_from_bottom() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem {
+            title: "A".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "B".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "C".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+
+        app.set_item_field(0, 0, |item| item.position = 1.0);
+        app.set_item_field(0, 1, |item| item.position = 1.0);
+        app.set_item_field(0, 2, |item| item.position = 1.0);
+
+        let titles_before: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        let first = titles_before[0].clone();
+        let second = titles_before[1].clone();
+        let third = titles_before[2].clone();
+
+        app.selected_item_index = 2;
+        app.move_todo_up();
+
+        let titles_after: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        assert_eq!(titles_after[0], first);
+        assert_eq!(titles_after[1], third);
+        assert_eq!(titles_after[2], second);
+        assert_eq!(app.selected_item_index, 1);
+    }
+
+    #[test]
+    fn test_move_todo_down_three_duplicate_positions_from_top() {
+        let mut list = TodoList::new("Work");
+        list.items.push(TodoItem {
+            title: "A".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "B".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        list.items.push(TodoItem {
+            title: "C".to_string(),
+            done: false,
+            tags: vec![],
+            time_secs: 0,
+        });
+        let mut app = App::with_lists(vec![list]);
+        app.active_pane = Pane::Main;
+
+        app.set_item_field(0, 0, |item| item.position = 1.0);
+        app.set_item_field(0, 1, |item| item.position = 1.0);
+        app.set_item_field(0, 2, |item| item.position = 1.0);
+
+        let titles_before: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        let first = titles_before[0].clone();
+        let second = titles_before[1].clone();
+        let third = titles_before[2].clone();
+
+        app.selected_item_index = 0;
+        app.move_todo_down();
+
+        let titles_after: Vec<_> = app
+            .visible_items()
+            .iter()
+            .map(|(_, i)| i.title.clone())
+            .collect();
+        assert_eq!(titles_after[0], second);
+        assert_eq!(titles_after[1], first);
+        assert_eq!(titles_after[2], third);
+        assert_eq!(app.selected_item_index, 1);
     }
 }
