@@ -50,6 +50,7 @@ pub struct App {
     dirty: bool,
     needs_full_reconcile: bool,
     sync_handle: Option<crate::sync_transport::SyncHandle>,
+    sync_event_tx: std::sync::mpsc::Sender<crate::sync_transport::SyncEvent>,
     pub sync_connected: bool,
     sync_backed_up: bool,
     pub pane_switch_at: Option<Instant>,
@@ -61,6 +62,7 @@ impl App {
         context: String,
         ascii_mode: bool,
         key_config: KeyConfig,
+        sync_event_tx: std::sync::mpsc::Sender<crate::sync_transport::SyncEvent>,
     ) -> std::io::Result<Self> {
         let context_dir = data_dir.join(&context);
         let (auto_doc, doc) = crate::crdt::load_context_document(&context_dir)?;
@@ -103,6 +105,7 @@ impl App {
             dirty: false,
             needs_full_reconcile: false,
             sync_handle: None,
+            sync_event_tx,
             sync_connected: false,
             sync_backed_up: false,
             pane_switch_at: None,
@@ -113,6 +116,7 @@ impl App {
                 config.server_url,
                 config.token,
                 context.clone(),
+                app.sync_event_tx.clone(),
             );
             app.sync_handle = Some(handle);
         }
@@ -164,6 +168,7 @@ impl App {
             dirty: false,
             needs_full_reconcile: false,
             sync_handle: None,
+            sync_event_tx: std::sync::mpsc::channel().0,
             sync_connected: false,
             sync_backed_up: false,
             pane_switch_at: None,
@@ -233,6 +238,7 @@ impl App {
                 config.server_url,
                 config.token,
                 name.to_string(),
+                self.sync_event_tx.clone(),
             ));
         }
     }
@@ -1850,19 +1856,17 @@ impl App {
         }
     }
 
-    pub fn receive_sync_messages(&mut self) -> bool {
+    pub fn process_sync_events(
+        &mut self,
+        events: Vec<crate::sync_transport::SyncEvent>,
+    ) -> bool {
         let mut changed = false;
 
-        let Some(handle) = &self.sync_handle else {
+        if events.is_empty() {
             return false;
-        };
-
-        let mut events = Vec::new();
-        while let Ok(event) = handle.event_rx.try_recv() {
-            events.push(event);
         }
 
-        if !events.is_empty() && self.needs_full_reconcile {
+        if self.needs_full_reconcile {
             let _ = autosurgeon::reconcile(&mut self.auto_doc, &self.doc);
             self.needs_full_reconcile = false;
         }
@@ -1872,13 +1876,22 @@ impl App {
                 crate::sync_transport::SyncEvent::MessageReceived(bytes) => {
                     if let Ok(mut server_doc) = AutoCommit::load(&bytes)
                         && server_doc.merge(&mut self.auto_doc).is_ok()
-                        && let Ok(new_doc) =
-                            autosurgeon::hydrate::<_, crate::crdt::CrdtDocument>(&server_doc)
                     {
-                        self.backup_before_sync();
-                        self.auto_doc = server_doc;
-                        self.doc = new_doc;
-                        changed = true;
+                        let our_heads = self.auto_doc.get_heads();
+                        let merged_heads = server_doc.get_heads();
+                        let has_new_changes = {
+                            let ours: std::collections::HashSet<_> = our_heads.iter().collect();
+                            merged_heads.iter().any(|h| !ours.contains(h))
+                        };
+                        if has_new_changes
+                            && let Ok(new_doc) =
+                                autosurgeon::hydrate::<_, crate::crdt::CrdtDocument>(&server_doc)
+                        {
+                            self.backup_before_sync();
+                            self.auto_doc = server_doc;
+                            self.doc = new_doc;
+                            changed = true;
+                        }
                     }
                 }
                 crate::sync_transport::SyncEvent::Connected => {

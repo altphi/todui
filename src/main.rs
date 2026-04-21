@@ -9,11 +9,21 @@ mod sync_transport;
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
+
+enum AppEvent {
+    Term(Event),
+    Sync(sync_transport::SyncEvent),
+    Tick,
+}
+
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DIRTY_DEBOUNCE: Duration = Duration::from_millis(300);
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -48,15 +58,62 @@ fn main() -> Result<()> {
         .join("todui");
     let key_config = config::KeyConfig::load(&config_dir);
 
-    let mut app = app::App::new(data_dir.clone(), context, ascii_mode, key_config)?;
+    let (app_event_tx, app_event_rx) = mpsc::channel::<AppEvent>();
+    let (sync_event_tx, sync_event_rx) = mpsc::channel::<sync_transport::SyncEvent>();
+
+    let mut app = app::App::new(
+        data_dir.clone(),
+        context,
+        ascii_mode,
+        key_config,
+        sync_event_tx,
+    )?;
     app.reset_daily_lists();
     let mut current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
 
+    spawn_input_thread(app_event_tx.clone());
+    spawn_sync_forwarder(sync_event_rx, app_event_tx.clone());
+    spawn_ticker(app_event_tx);
+
     let terminal = ratatui::init();
-    let result = run(&mut app, terminal, &mut current_date);
+    let result = run(&mut app, terminal, &mut current_date, app_event_rx);
     ratatui::restore();
     storage::release_lock(&data_dir);
     result
+}
+
+fn spawn_input_thread(tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        while let Ok(ev) = event::read() {
+            if tx.send(AppEvent::Term(ev)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_sync_forwarder(
+    rx: mpsc::Receiver<sync_transport::SyncEvent>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        while let Ok(ev) = rx.recv() {
+            if tx.send(AppEvent::Sync(ev)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_ticker(tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            if tx.send(AppEvent::Tick).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 fn parse_args() -> (PathBuf, bool) {
@@ -83,61 +140,98 @@ fn parse_args() -> (PathBuf, bool) {
     (data_dir, ascii_mode)
 }
 
-fn run(app: &mut app::App, mut terminal: DefaultTerminal, current_date: &mut String) -> Result<()> {
+fn run(
+    app: &mut app::App,
+    mut terminal: DefaultTerminal,
+    current_date: &mut String,
+    rx: mpsc::Receiver<AppEvent>,
+) -> Result<()> {
     let mut show_help = false;
+    let mut needs_redraw = true;
 
     while app.running {
+        if needs_redraw {
+            terminal.draw(|frame| {
+                ui::render(app, frame);
+                if show_help {
+                    ui::render_help(frame, &app.key_config);
+                }
+            })?;
+            needs_redraw = false;
+        }
+
+        let timeout = next_wake(app);
+        let mut timed_out = false;
+        match rx.recv_timeout(timeout) {
+            Ok(AppEvent::Term(Event::Key(key))) => {
+                if key.kind == KeyEventKind::Press {
+                    if key.code == crossterm::event::KeyCode::Char('?')
+                        && app.input_mode == model::InputMode::Normal
+                    {
+                        show_help = !show_help;
+                    } else if show_help {
+                        show_help = false;
+                    } else {
+                        input::handle_key(app, key);
+                    }
+                    needs_redraw = true;
+                }
+            }
+            Ok(AppEvent::Term(_)) => {
+                needs_redraw = true;
+            }
+            Ok(AppEvent::Sync(ev)) => {
+                if app.process_sync_events(vec![ev]) {
+                    needs_redraw = true;
+                }
+            }
+            Ok(AppEvent::Tick) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                timed_out = true;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                app.running = false;
+            }
+        }
+
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if today != *current_date {
             *current_date = today;
             app.reset_daily_lists();
+            needs_redraw = true;
         }
 
-        let sync_changed = app.receive_sync_messages();
+        if let Some(switched_at) = app.pane_switch_at
+            && switched_at.elapsed() >= ui::PANE_FLASH_DURATION
+        {
+            app.pane_switch_at = None;
+            needs_redraw = true;
+        }
 
-        terminal.draw(|frame| {
-            ui::render(app, frame);
-            if show_help {
-                ui::render_help(frame, &app.key_config);
-            }
-        })?;
-
-        let timeout = if app.input_mode == model::InputMode::Focused {
-            Duration::from_millis(250)
-        } else if app.is_dirty() || sync_changed || app.has_sync() {
-            Duration::from_millis(500)
-        } else {
-            Duration::from_secs(60)
-        };
-        let has_event = event::poll(timeout)?;
-
-        if !has_event {
+        if timed_out {
             app.flush();
-            continue;
-        }
-
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            if key.code == crossterm::event::KeyCode::Char('?')
-                && app.input_mode == model::InputMode::Normal
-            {
-                show_help = !show_help;
-                continue;
-            }
-
-            if show_help {
-                show_help = false;
-                continue;
-            }
-
-            input::handle_key(app, key);
         }
     }
 
     Ok(())
+}
+
+fn next_wake(app: &app::App) -> Duration {
+    let mut wake = IDLE_TIMEOUT;
+    if app.is_dirty() {
+        wake = wake.min(DIRTY_DEBOUNCE);
+    }
+    if let Some(switched_at) = app.pane_switch_at {
+        let remaining = ui::PANE_FLASH_DURATION
+            .checked_sub(switched_at.elapsed())
+            .unwrap_or(Duration::ZERO);
+        if remaining > Duration::ZERO {
+            wake = wake.min(remaining);
+        } else {
+            wake = Duration::from_millis(1);
+        }
+    }
+    wake
 }
 
 fn handle_login() -> color_eyre::Result<()> {

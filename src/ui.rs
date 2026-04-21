@@ -12,7 +12,7 @@ use crate::app::App;
 use crate::config::{Action, KeyConfig};
 use crate::model::{InputMode, Pane, SearchResult, SidebarEntry};
 
-const PANE_FLASH_DURATION: Duration = Duration::from_millis(150);
+pub const PANE_FLASH_DURATION: Duration = Duration::from_millis(150);
 
 fn pane_title_style(app: &App, pane: Pane) -> Style {
     let is_active = app.active_pane == pane;

@@ -2,6 +2,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
@@ -17,13 +18,16 @@ pub enum SyncEvent {
 }
 
 pub struct SyncHandle {
-    pub command_tx: mpsc::Sender<SyncCommand>,
-    pub event_rx: mpsc::Receiver<SyncEvent>,
+    pub command_tx: tokio_mpsc::UnboundedSender<SyncCommand>,
 }
 
-pub fn start_sync_thread(server_url: String, token: String, context_id: String) -> SyncHandle {
-    let (command_tx, command_rx) = mpsc::channel();
-    let (event_tx, event_rx) = mpsc::channel();
+pub fn start_sync_thread(
+    server_url: String,
+    token: String,
+    context_id: String,
+    event_tx: mpsc::Sender<SyncEvent>,
+) -> SyncHandle {
+    let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -35,10 +39,7 @@ pub fn start_sync_thread(server_url: String, token: String, context_id: String) 
         ));
     });
 
-    SyncHandle {
-        command_tx,
-        event_rx,
-    }
+    SyncHandle { command_tx }
 }
 
 fn to_ws_url(server_url: &str) -> String {
@@ -55,7 +56,7 @@ async fn sync_loop(
     server_url: String,
     token: String,
     context_id: String,
-    command_rx: mpsc::Receiver<SyncCommand>,
+    mut command_rx: tokio_mpsc::UnboundedReceiver<SyncCommand>,
     event_tx: mpsc::Sender<SyncEvent>,
 ) {
     let mut backoff = Duration::from_secs(1);
@@ -89,7 +90,7 @@ async fn sync_loop(
                 backoff = Duration::from_secs(1);
                 let _ = event_tx.send(SyncEvent::Connected);
 
-                let shutdown = run_session(ws_stream, &command_rx, &event_tx).await;
+                let shutdown = run_session(ws_stream, &mut command_rx, &event_tx).await;
 
                 let _ = event_tx.send(SyncEvent::Disconnected);
 
@@ -107,7 +108,7 @@ async fn sync_loop(
 
 async fn run_session<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
-    command_rx: &mpsc::Receiver<SyncCommand>,
+    command_rx: &mut tokio_mpsc::UnboundedReceiver<SyncCommand>,
     event_tx: &mpsc::Sender<SyncEvent>,
 ) -> bool
 where
@@ -116,29 +117,32 @@ where
     let (mut write, mut read) = ws_stream.split();
 
     loop {
-        match command_rx.try_recv() {
-            Ok(SyncCommand::SendMessage(bytes)) => {
-                if write.send(Message::Binary(bytes.into())).await.is_err() {
-                    return false;
+        tokio::select! {
+            cmd = command_rx.recv() => {
+                match cmd {
+                    Some(SyncCommand::SendMessage(bytes)) => {
+                        if write.send(Message::Binary(bytes.into())).await.is_err() {
+                            return false;
+                        }
+                    }
+                    Some(SyncCommand::Shutdown) => {
+                        let _ = write.send(Message::Close(None)).await;
+                        return true;
+                    }
+                    None => return true,
                 }
             }
-            Ok(SyncCommand::Shutdown) => {
-                let _ = write.send(Message::Close(None)).await;
-                return true;
+            frame = read.next() => {
+                match frame {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        let _ = event_tx.send(SyncEvent::MessageReceived(bytes.to_vec()));
+                    }
+                    Some(Ok(Message::Close(_))) => return false,
+                    Some(Err(_)) => return false,
+                    None => return false,
+                    Some(Ok(_)) => {}
+                }
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => return true,
-        }
-
-        match tokio::time::timeout(Duration::from_millis(100), read.next()).await {
-            Ok(Some(Ok(Message::Binary(bytes)))) => {
-                let _ = event_tx.send(SyncEvent::MessageReceived(bytes.to_vec()));
-            }
-            Ok(Some(Ok(Message::Close(_)))) => return false,
-            Ok(Some(Err(_))) => return false,
-            Ok(None) => return false,
-            Ok(Some(Ok(_))) => {}
-            Err(_) => {}
         }
     }
 }
